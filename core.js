@@ -198,6 +198,13 @@
       logBadge('⚪', '오버라이드 해제(실제시각 기준)', '#7f8c8d');
     };
 
+    // 진단용: 등록이 스크립트 자기 자신 관점에서 실제로 잡혔는지 즉시 확인
+    console.log(
+      '[Clore Core] 노출 진단 — unsafeWindow존재:', typeof unsafeWindow !== 'undefined',
+      '| window===globalTarget:', window === globalTarget,
+      '| typeof window.testClear:', typeof window.testClear
+    );
+
     function checkClosing(closing) {
       const now = new Date();
       const target = getCloseTime(now, closing);
