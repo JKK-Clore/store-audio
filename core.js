@@ -18,6 +18,7 @@
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
     const allTracks = [
       ...(cfg.audio?.tracks || []),
+      ...(cfg.filler?.track ? [cfg.filler.track] : []),
       ...cfg.closing.offsetsMin.map(m => `${cfg.closing.baseUrl}${m}m.mp3`),
     ];
     allTracks.forEach(preload);
@@ -96,7 +97,7 @@
       if (adShowing && !state.adActive) {
         state.adActive = true;
         video.muted = true;
-        if (cfg.muteDuringAd?.enabled) playFiller();
+        if (cfg.muteDuringAd?.enabled && !state.storeClosed) playFiller();
       } else if (!adShowing && state.adActive) {
         state.adActive = false;
         stopFiller(cfg.muteDuringAd.fadeMs, () => { video.muted = false; });
@@ -105,14 +106,18 @@
     adObserver.observe(document.body, { childList: true, subtree: true });
 
     function playFiller() {
-      const tracks = cfg.audio?.tracks;
-      if (!tracks?.length) return;
-      let idx = Math.floor(Math.random() * tracks.length);
+      const introTracks = cfg.audio?.tracks || []; // 고정 순서: promo1 → promo2
+      const loopUrl = cfg.filler?.track; // 그 이후엔 이 트랙만 반복
+      if (!introTracks.length && !loopUrl) return;
+      let idx = 0;
       playNext();
 
       function playNext() {
         if (!state.adActive) return; // 광고가 이미 끝났으면 체인 중단
-        const url = tracks[idx % tracks.length];
+        if (state.storeClosed) return; // 재생 도중 마감 전환되면 체인 중단 (조용히 뮤트만 유지)
+        const url = idx < introTracks.length
+          ? introTracks[idx]
+          : (loopUrl || introTracks[introTracks.length - 1]); // filler 아직 없으면 마지막 프로모로 폴백
         idx++;
         const a = new Audio(blobCache[url] || url);
         a.volume = 0;
@@ -180,6 +185,7 @@
       const closed = isInClosedWindow(now, closing);
       const video = document.querySelector('video');
       if (closed && !state.storeClosed) {
+        if (state.adActive) return; // 광고 재생 중엔 건드리지 않음, 광고 끝난 뒤 다음 tick에 재시도
         state.storeClosed = true;
         video?.pause();
       } else if (!closed && state.storeClosed) {
