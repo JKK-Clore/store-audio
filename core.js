@@ -44,6 +44,48 @@
       state.lastAudioAt = Date.now(); // 프로모/마감 공통 타임스탬프
     }
 
+    // 띵동 2음 차임 (합성음, 별도 파일 불필요)
+    function playChime() {
+      return new Promise((resolve) => {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const notes = [659, 523]; // 띵(E5) → 동(C5)
+        notes.forEach((freq, i) => {
+          const osc  = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          const t = ctx.currentTime + i * 0.35;
+          gain.gain.setValueAtTime(0.4, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
+          osc.start(t);
+          osc.stop(t + 0.6);
+        });
+        setTimeout(resolve, notes.length * 350 + 500);
+      });
+    }
+
+    // 마감 안내 세트: (띵동 → 오디오) × repeat, 세트 사이 1초 간격
+    function playClosingSet(url, volume, repeat) {
+      let count = 0;
+      playOnce();
+
+      function playOnce() {
+        count++;
+        playChime().then(() => {
+          const src = blobCache[url] || url;
+          const a = new Audio(src);
+          a.volume = volume ?? 1;
+          a.play().catch(e => console.warn('[Clore Core] 마감 안내 재생 실패', url, e));
+          state.lastAudioAt = Date.now();
+          if (count < repeat) {
+            a.addEventListener('ended', () => setTimeout(playOnce, 1000));
+          }
+        });
+      }
+    }
+
     // ━━━ 1. 광고 진입/종료 감지 → mute + 필러 방송 (클릭/차단 없음, 광고는 자연 재생·자연 종료) ━━━
     // 필러 오디오는 프로모 트랙을 그대로 재사용 (별도 파일 불필요)
     const adObserver = new MutationObserver(() => {
@@ -130,7 +172,8 @@
         const key = `${now.toDateString()}_${min}`;
         if (Math.abs(diffMin - min) < 0.5 && !state.closedFlags[key]) {
           state.closedFlags[key] = true;
-          playOneShot(`${closing.baseUrl}${min}m.mp3`, closing.volume);
+          const repeat = min === 30 ? 1 : 2; // 30분전은 17초라 충분히 김, 나머지는 두 번
+          playClosingSet(`${closing.baseUrl}${min}m.mp3`, closing.volume, repeat);
         }
       });
 
