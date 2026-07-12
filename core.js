@@ -12,7 +12,7 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
-    const state = { adActive: false, fillerAudio: null, closedFlags: {}, lastAudioAt: Date.now() };
+    const state = { adActive: false, fillerAudio: null, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
     const blobCache = {}; // url → objectURL
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
@@ -41,6 +41,7 @@
       const a = new Audio(src);
       a.volume = volume ?? 1;
       a.play().catch(e => console.warn('[Clore Core] 재생 실패', url, e));
+      state.lastAudioAt = Date.now(); // 프로모/마감 공통 타임스탬프
     }
 
     // ━━━ 1. 광고 진입/종료 감지 → mute + 필러 방송 (클릭/차단 없음, 광고는 자연 재생·자연 종료) ━━━
@@ -109,16 +110,17 @@
       const gapMs = cfg.audio.intervalMin * 60 * 1000;
       setInterval(() => {
         if (state.adActive) return;
+        if (state.storeClosed) return; // 마감30분전~다음날오픈 전: 프로모 정지
         if (Date.now() - state.lastAudioAt < gapMs) return;
         const track = cfg.audio.tracks[idx % cfg.audio.tracks.length];
         idx++;
         playOneShot(track, cfg.audio.volume);
-        state.lastAudioAt = Date.now();
       }, 30000); // 30초마다 조건 체크 (실제 재생은 gapMs 조건 만족할 때만)
     }
 
-    // ━━━ 4. 마감 방송 (시즌별 스케줄, 30/15/5/2분 전) ━━━
-    setInterval(() => checkClosing(cfg.closing), cfg.testMode ? 5000 : 30000);
+    // ━━━ 4. 마감 방송(30/15/5/2분 전) + 영업시간 외 정지 ━━━
+    // 마감30분전(offsetsMin 최댓값 기준) ~ 다음날 openTime 까지: 영상 pause + 프로모 정지
+    setInterval(() => checkClosing(cfg.closing), 30000);
 
     function checkClosing(closing) {
       const now = new Date();
@@ -131,6 +133,28 @@
           playOneShot(`${closing.baseUrl}${min}m.mp3`, closing.volume);
         }
       });
+
+      const closed = isInClosedWindow(now, closing);
+      const video = document.querySelector('video');
+      if (closed && !state.storeClosed) {
+        state.storeClosed = true;
+        video?.pause();
+      } else if (!closed && state.storeClosed) {
+        state.storeClosed = false;
+        video?.play().catch(() => {});
+      }
+    }
+
+    function isInClosedWindow(now, closing) {
+      const close = getCloseTime(now, closing);
+      const pauseMin = Math.max(...closing.offsetsMin); // 30
+      const pauseStart = new Date(close.getTime() - pauseMin * 60000);
+      if (now >= pauseStart) return true; // 마감 30분 전 이후
+
+      const [oh, om] = closing.openTime.split(':').map(Number);
+      const todayOpen = new Date(now);
+      todayOpen.setHours(oh, om, 0, 0);
+      return now < todayOpen; // 오늘 아직 오픈 전
     }
 
     function getCloseTime(now, closing) {
