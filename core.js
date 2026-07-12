@@ -167,6 +167,7 @@
 
     // ━━━ 4. 마감 방송(30/15/5/2분 전) + 영업시간 외 정지 ━━━
     // 마감30분전(offsetsMin 최댓값 기준) ~ 다음날 openTime 까지: 영상 pause + 프로모 정지
+    checkClosing(cfg.closing); // 로드 직후 즉시 1회 판정 (30초 대기 없이 state.storeClosed 확정)
     setInterval(() => checkClosing(cfg.closing), 30000);
 
     function checkClosing(closing) {
