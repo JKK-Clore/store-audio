@@ -171,32 +171,32 @@
     setInterval(() => checkClosing(cfg.closing), 30000);
 
     // 테스트용 원샷 함수: localStorage 세팅 + 즉시 재판정 + 시각적 콘솔 확인까지 한 번에
-    if (typeof unsafeWindow !== 'undefined') {
-      unsafeWindow.closeCheckNow = () => checkClosing(cfg.closing);
+    // unsafeWindow가 있으면(진짜 샌드박스) 그쪽에, 없으면(<script> 직접주입 등) window에 등록
+    const globalTarget = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    globalTarget.closeCheckNow = () => checkClosing(cfg.closing);
 
-      const logBadge = (icon, label, bg) => {
-        console.log(
-          `%c${icon} ${label} → storeClosed=${state.storeClosed}`,
-          `color:#fff;background:${bg};padding:2px 8px;border-radius:4px;font-weight:bold;`
-        );
-      };
+    const logBadge = (icon, label, bg) => {
+      console.log(
+        `%c${icon} ${label} → storeClosed=${state.storeClosed}`,
+        `color:#fff;background:${bg};padding:2px 8px;border-radius:4px;font-weight:bold;`
+      );
+    };
 
-      unsafeWindow.testClosed = () => {
-        localStorage.setItem('clore_test_closed', 'closed');
-        checkClosing(cfg.closing);
-        logBadge('🔴', 'CLOSED 강제 적용', '#c0392b');
-      };
-      unsafeWindow.testOpen = () => {
-        localStorage.setItem('clore_test_closed', 'open');
-        checkClosing(cfg.closing);
-        logBadge('🟢', 'OPEN 강제 적용', '#27ae60');
-      };
-      unsafeWindow.testClear = () => {
-        localStorage.removeItem('clore_test_closed');
-        checkClosing(cfg.closing);
-        logBadge('⚪', '오버라이드 해제(실제시각 기준)', '#7f8c8d');
-      };
-    }
+    globalTarget.testClosed = () => {
+      localStorage.setItem('clore_test_closed', 'closed');
+      checkClosing(cfg.closing);
+      logBadge('🔴', 'CLOSED 강제 적용', '#c0392b');
+    };
+    globalTarget.testOpen = () => {
+      localStorage.setItem('clore_test_closed', 'open');
+      checkClosing(cfg.closing);
+      logBadge('🟢', 'OPEN 강제 적용', '#27ae60');
+    };
+    globalTarget.testClear = () => {
+      localStorage.removeItem('clore_test_closed');
+      checkClosing(cfg.closing);
+      logBadge('⚪', '오버라이드 해제(실제시각 기준)', '#7f8c8d');
+    };
 
     function checkClosing(closing) {
       const now = new Date();
