@@ -1,38 +1,22 @@
 {
-  "testMode": false,
-
-  "adSkip": {
-    "skipButtonSelectors": [
-      ".ytp-skip-ad-button",
-      ".ytp-ad-skip-button",
-      "button.ytp-ad-skip-button-modern",
-      ".ytp-ad-skip-button-container button",
-      "button[class*='skip']"
-    ],
-    "clickDelayMinMs": 300,
-    "clickDelayMaxMs": 800
-  },
-
   "muteDuringAd": {
     "enabled": true,
     "fadeMs": 300
   },
-
   "continueWatchingDialog": {
     "enabled": true,
     "pollMs": 1000
   },
-
   "closing": {
     "baseUrl": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/",
     "offsetsMin": [30, 15, 5, 2],
+    "openTime": "09:30",
     "volume": 1,
     "hours": {
       "summer": { "monFri": "22:00", "sat": "21:00", "sun": "18:00" },
       "winter": { "monFri": "21:00", "sat": "20:00", "sun": "18:00" }
     }
   },
-
   "audio": {
     "enabled": true,
     "intervalMin": 15,
