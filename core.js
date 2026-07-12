@@ -170,6 +170,34 @@
     checkClosing(cfg.closing); // 로드 직후 즉시 1회 판정 (30초 대기 없이 state.storeClosed 확정)
     setInterval(() => checkClosing(cfg.closing), 30000);
 
+    // 테스트용 원샷 함수: localStorage 세팅 + 즉시 재판정 + 시각적 콘솔 확인까지 한 번에
+    if (typeof unsafeWindow !== 'undefined') {
+      unsafeWindow.closeCheckNow = () => checkClosing(cfg.closing);
+
+      const logBadge = (icon, label, bg) => {
+        console.log(
+          `%c${icon} ${label} → storeClosed=${state.storeClosed}`,
+          `color:#fff;background:${bg};padding:2px 8px;border-radius:4px;font-weight:bold;`
+        );
+      };
+
+      unsafeWindow.testClosed = () => {
+        localStorage.setItem('clore_test_closed', 'closed');
+        checkClosing(cfg.closing);
+        logBadge('🔴', 'CLOSED 강제 적용', '#c0392b');
+      };
+      unsafeWindow.testOpen = () => {
+        localStorage.setItem('clore_test_closed', 'open');
+        checkClosing(cfg.closing);
+        logBadge('🟢', 'OPEN 강제 적용', '#27ae60');
+      };
+      unsafeWindow.testClear = () => {
+        localStorage.removeItem('clore_test_closed');
+        checkClosing(cfg.closing);
+        logBadge('⚪', '오버라이드 해제(실제시각 기준)', '#7f8c8d');
+      };
+    }
+
     function checkClosing(closing) {
       const now = new Date();
       const target = getCloseTime(now, closing);
@@ -196,8 +224,7 @@
     }
 
     function isInClosedWindow(now, closing) {
-      // 테스트용: 콘솔에서 localStorage.setItem('clore_test_closed','closed'|'open')
-      // 이 브라우저에서만 적용됨, config.json은 안 건드림 → 다른 지점에 영향 없음
+      // 테스트용: 콘솔에서 testOpen() / testClosed() / testClear() 사용
       const override = localStorage.getItem('clore_test_closed');
       if (override === 'closed') return true;
       if (override === 'open') return false;
@@ -251,6 +278,6 @@
     }
 
     console.log('[Clore Core] 로딩 완료 (전 지점 공통)');
-    console.log('[Clore Core] 테스트: localStorage.setItem("clore_test_closed","closed") 또는 "open" / 해제는 removeItem("clore_test_closed")');
+    console.log('[Clore Core] 테스트: testClosed() / testOpen() / testClear() 콘솔에서 바로 호출');
   }
 })();
