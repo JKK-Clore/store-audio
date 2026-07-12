@@ -12,7 +12,7 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
-    const state = { adActive: false, skipHandled: false, fillerAudio: null, closedFlags: {} };
+    const state = { adActive: false, fillerAudio: null, closedFlags: {}, lastAudioAt: Date.now() };
     const blobCache = {}; // url → objectURL
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
@@ -43,17 +43,7 @@
       a.play().catch(e => console.warn('[Clore Core] 재생 실패', url, e));
     }
 
-    // ━━━ 1. 광고 스킵 — 사람 유사 타이밍 클릭 (강제 currentTime 조작 없음) ━━━
-    setInterval(() => {
-      const btn = document.querySelector(cfg.adSkip.skipButtonSelectors.join(', '));
-      if (btn && !state.skipHandled) {
-        state.skipHandled = true;
-        const delay = rand(cfg.adSkip.clickDelayMinMs, cfg.adSkip.clickDelayMaxMs);
-        setTimeout(() => btn.click(), delay);
-      }
-    }, 500);
-
-    // ━━━ 2. 광고 진입/종료 감지 → mute + 필러 방송 (요청 자체는 절대 차단 안 함) ━━━
+    // ━━━ 1. 광고 진입/종료 감지 → mute + 필러 방송 (클릭/차단 없음, 광고는 자연 재생·자연 종료) ━━━
     // 필러 오디오는 프로모 트랙을 그대로 재사용 (별도 파일 불필요)
     const adObserver = new MutationObserver(() => {
       const video = document.querySelector('video');
@@ -62,7 +52,6 @@
 
       if (adShowing && !state.adActive) {
         state.adActive = true;
-        state.skipHandled = false; // 다음 광고 대비 리셋
         video.muted = true;
         if (cfg.muteDuringAd?.enabled) playFiller();
       } else if (!adShowing && state.adActive) {
@@ -75,12 +64,21 @@
     function playFiller() {
       const tracks = cfg.audio?.tracks;
       if (!tracks?.length) return;
-      const url = tracks[Math.floor(Math.random() * tracks.length)];
-      const a = new Audio(blobCache[url] || url);
-      a.volume = 0;
-      a.play().catch(() => {});
-      state.fillerAudio = a;
-      fadeTo(a, 1, cfg.muteDuringAd.fadeMs);
+      let idx = Math.floor(Math.random() * tracks.length);
+      playNext();
+
+      function playNext() {
+        if (!state.adActive) return; // 광고가 이미 끝났으면 체인 중단
+        const url = tracks[idx % tracks.length];
+        idx++;
+        const a = new Audio(blobCache[url] || url);
+        a.volume = 0;
+        a.play().catch(() => {});
+        state.fillerAudio = a;
+        state.lastAudioAt = Date.now(); // 프로모 스케줄과 최소 간격 공유
+        fadeTo(a, 1, cfg.muteDuringAd.fadeMs);
+        a.addEventListener('ended', playNext); // 광고가 계속되면 다음 트랙으로 이어서
+      }
     }
 
     function stopFiller(fadeMs, onDone) {
@@ -90,7 +88,7 @@
       fadeTo(a, 0, fadeMs, () => { a.pause(); onDone?.(); });
     }
 
-    // ━━━ 3. "계속 시청하시겠습니까" 팝업 자동 확인 (안전망) ━━━
+    // ━━━ 2. "계속 시청하시겠습니까" 팝업 자동 확인 (안전망) ━━━
     if (cfg.continueWatchingDialog?.enabled) {
       setInterval(() => {
         const official = document.querySelector('.ytp-confirm-dialog-renderer-button-primary');
@@ -104,18 +102,22 @@
       }, cfg.continueWatchingDialog.pollMs);
     }
 
-    // ━━━ 4. 프로모 방송 (주기 재생, 광고 중엔 스킵) ━━━
+    // ━━━ 3. 프로모 방송 — 고정 시계가 아니라 "마지막 방송 후 경과시간" 기준 ━━━
+    // 광고 필러가 최근에 나갔으면 자동으로 뒤로 밀림 (광고 빈도를 몰라도 최소 간격 보장)
     if (cfg.audio?.enabled) {
       let idx = 0;
+      const gapMs = cfg.audio.intervalMin * 60 * 1000;
       setInterval(() => {
         if (state.adActive) return;
+        if (Date.now() - state.lastAudioAt < gapMs) return;
         const track = cfg.audio.tracks[idx % cfg.audio.tracks.length];
         idx++;
         playOneShot(track, cfg.audio.volume);
-      }, cfg.audio.intervalMin * 60 * 1000);
+        state.lastAudioAt = Date.now();
+      }, 30000); // 30초마다 조건 체크 (실제 재생은 gapMs 조건 만족할 때만)
     }
 
-    // ━━━ 5. 마감 방송 (시즌별 스케줄, 30/15/5/2분 전) ━━━
+    // ━━━ 4. 마감 방송 (시즌별 스케줄, 30/15/5/2분 전) ━━━
     setInterval(() => checkClosing(cfg.closing), cfg.testMode ? 5000 : 30000);
 
     function checkClosing(closing) {
@@ -156,8 +158,6 @@
     }
 
     // ━━━ 유틸 ━━━
-    function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
     function fadeTo(audio, target, ms, onDone) {
       const steps = 10;
       const start = audio.volume;
