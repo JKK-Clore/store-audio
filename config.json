@@ -26,5 +26,9 @@
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo1.m4a",
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo2.m4a"
     ]
+  },
+
+  "filler": {
+    "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
   }
 }
