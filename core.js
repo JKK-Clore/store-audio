@@ -146,6 +146,12 @@
     }
 
     function isInClosedWindow(now, closing) {
+      // 테스트용: 콘솔에서 localStorage.setItem('clore_test_closed','closed'|'open')
+      // 이 브라우저에서만 적용됨, config.json은 안 건드림 → 다른 지점에 영향 없음
+      const override = localStorage.getItem('clore_test_closed');
+      if (override === 'closed') return true;
+      if (override === 'open') return false;
+
       const close = getCloseTime(now, closing);
       const pauseMin = Math.max(...closing.offsetsMin); // 30
       const pauseStart = new Date(close.getTime() - pauseMin * 60000);
@@ -195,5 +201,6 @@
     }
 
     console.log('[Clore Core] 로딩 완료 (전 지점 공통)');
+    console.log('[Clore Core] 테스트: localStorage.setItem("clore_test_closed","closed") 또는 "open" / 해제는 removeItem("clore_test_closed")');
   }
 })();
