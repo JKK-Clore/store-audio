@@ -45,11 +45,11 @@
       state.lastAudioAt = Date.now(); // 프로모/마감 공통 타임스탬프
     }
 
-    // 띵동 2음 차임 (합성음, 별도 파일 불필요)
+    // 삼단 3음 차임 (합성음, 별도 파일 불필요)
     function playChime() {
       return new Promise((resolve) => {
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const notes = [659, 523]; // 띵(E5) → 동(C5)
+        const notes = [523, 659, 784]; // 도(C5) → 미(E5) → 솔(G5) 상승 3음
         notes.forEach((freq, i) => {
           const osc  = ctx.createOscillator();
           const gain = ctx.createGain();
