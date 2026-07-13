@@ -14,7 +14,15 @@
   function init(cfg) {
     const state = { adActive: false, fillerAudio: null, fillerGainNode: null, fillerAudioCtx: null, pendingUnmute: null, fillerChainActive: false, currentIsFiller: false, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
     const blobCache = {}; // url → objectURL
-    const safeGain = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 1; }; // GainNode는 1 넘어도 진짜 증폭됨, 음수/이상값만 방지
+    const branchVolumeMultiplier = () => {
+      const n = Number(window.CLORE_VOLUME_MULTIPLIER);
+      return Number.isFinite(n) && n > 0 ? n : 1; // loader.user.js에서 지점별로 설정, 없으면 1(보정 없음)
+    };
+    const safeGain = (v) => { // GainNode는 1 넘어도 진짜 증폭됨, 음수/이상값만 방지 + 지점 배율 적용
+      const n = Number(v);
+      const base = Number.isFinite(n) && n >= 0 ? n : 1;
+      return base * branchVolumeMultiplier();
+    };
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
     const allTracks = [
@@ -40,8 +48,11 @@
 
     function playOneShot(url, volume) {
       const src = blobCache[url] || url;
+      if (!blobCache[url]) console.warn('[Clore Core] blob 미준비, 원격 URL로 재생:', url);
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const a = new Audio(src);
+      const a = new Audio();
+      a.crossOrigin = 'anonymous'; // blob 준비 전 원격 URL로 폴백돼도 Web Audio에서 무음 안 되게
+      a.src = src;
       const source = audioCtx.createMediaElementSource(a);
       const gainNode = audioCtx.createGain();
       gainNode.gain.value = safeGain(volume); // 1 넘는 값도 실제 증폭으로 반영됨
@@ -83,8 +94,11 @@
         count++;
         playChime().then(() => {
           const src = blobCache[url] || url;
+          if (!blobCache[url]) console.warn('[Clore Core] blob 미준비, 원격 URL로 재생:', url);
           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const a = new Audio(src);
+          const a = new Audio();
+          a.crossOrigin = 'anonymous';
+          a.src = src;
           const source = audioCtx.createMediaElementSource(a);
           const gainNode = audioCtx.createGain();
           gainNode.gain.value = safeGain(volume); // 1 넘는 값도 실제 증폭
@@ -200,9 +214,12 @@
         const startTrack = () => {
           // 차임을 이미 시작한 이상 반드시 내용까지 재생 (차임+내용은 항상 하나의 단위체)
           state.currentIsFiller = !step.chime; // 차임 없는 구간 = 배경음악(필러), 중간에 끊겨도 되는 구간
-          const targetVol = step.chime ? safeGain(cfg.audio?.volume) : 1; // 프로모=cfg.audio.volume(광고필러든 정규든 동일), 필러=고정 1
+          const targetVol = step.chime ? safeGain(cfg.audio?.volume) : safeGain(1); // 프로모=cfg.audio.volume, 필러=고정1 — 둘 다 지점배율은 적용받음
           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const a = new Audio(blobCache[step.url] || step.url);
+          const a = new Audio();
+          a.crossOrigin = 'anonymous';
+          a.src = blobCache[step.url] || step.url;
+          if (!blobCache[step.url]) console.warn('[Clore Core] blob 미준비, 원격 URL로 재생:', step.url);
           const source = audioCtx.createMediaElementSource(a);
           const gainNode = audioCtx.createGain();
           gainNode.gain.value = 0;
