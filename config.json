@@ -21,7 +21,7 @@
   "audio": {
     "enabled": true,
     "intervalMin": 15,
-    "volume": 3,
+    "volume": 4,
     "activeUntil": "2026-07-26",
     "text": "📢 Attention: An announcement is currently being broadcast.",
     "tracks": [
