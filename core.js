@@ -12,7 +12,7 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
-    const state = { adActive: false, fillerAudio: null, pendingUnmute: null, fillerChainActive: false, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
+    const state = { adActive: false, fillerAudio: null, pendingUnmute: null, fillerChainActive: false, currentIsFiller: false, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
     const blobCache = {}; // url → objectURL
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
@@ -105,19 +105,29 @@
         if (cfg.muteDuringAd?.enabled && !state.storeClosed) playFiller();
       } else if (!adShowing && state.adActive) {
         state.adActive = false;
-        // muteEnforcer는 여기서 바로 끄지 않음 — 필러가 아직 도는 동안 유튜브가 자체적으로
-        // muted를 풀어버려 필러랑 겹쳐 들리는 문제 방지, 실제 언뮤트되는 순간까지 계속 감시
-        if (state.fillerChainActive) {
-          // 체인이 아직 진행 중(차임 대기중이든 트랙 재생중이든)이면 그게 다 끝날 때까지 대기 후 언뮤트
-          state.pendingUnmute = () => {
-            clearInterval(muteEnforcer);
-            muteEnforcer = null;
-            video.muted = false;
-          };
-        } else {
+        const fadeMs = cfg.muteDuringAd.crossfadeMs || 700;
+        const fadeInVideo = () => {
           clearInterval(muteEnforcer);
           muteEnforcer = null;
-          video.muted = false; // 체인 자체가 없으면 바로 언뮤트
+          const targetVolume = video.volume || 1; // 원래 볼륨으로 되돌아가야 하니 지금 값을 목표로
+          video.muted = false;
+          video.volume = 0;
+          fadeTo(video, targetVolume, fadeMs); // "팍" 튀지 않고 서서히 올라오게
+        };
+
+        if (state.fillerChainActive && state.currentIsFiller && state.fillerAudio) {
+          // 필러(배경음) 구간이면 굳이 끝까지 안 기다리고 바로 크로스페이드로 부드럽게 전환
+          const filler = state.fillerAudio;
+          state.fillerAudio = null;
+          state.fillerChainActive = false;
+          state.pendingUnmute = null;
+          fadeInVideo();
+          fadeTo(filler, 0, fadeMs, () => filler.pause()); // 필러 소리 서서히 내리기
+        } else if (state.fillerChainActive) {
+          // 프로모(차임+내용) 구간이면 기존처럼 끝까지 재생 후, 언뮤트는 여기도 부드럽게
+          state.pendingUnmute = fadeInVideo;
+        } else {
+          fadeInVideo(); // 체인 자체가 없어도 마찬가지로 부드럽게
         }
       }
     });
@@ -168,6 +178,7 @@
 
         const startTrack = () => {
           // 차임을 이미 시작한 이상 반드시 내용까지 재생 (차임+내용은 항상 하나의 단위체)
+          state.currentIsFiller = !step.chime; // 차임 없는 구간 = 배경음악(필러), 중간에 끊겨도 되는 구간
           const a = new Audio(blobCache[step.url] || step.url);
           a.volume = 0;
           a.play().catch(() => {});
