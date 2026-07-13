@@ -89,28 +89,24 @@
 
     // ━━━ 1. 광고 진입/종료 감지 → mute + 필러 방송 (클릭/차단 없음, 광고는 자연 재생·자연 종료) ━━━
     // 필러 오디오는 프로모 트랙을 그대로 재사용 (별도 파일 불필요)
-    let hookedVideo = null;
-    function hookVideoLoadEvents(video) {
-      if (hookedVideo === video) return; // 이미 훅 걸린 엘리먼트면 중복 방지
-      hookedVideo = video;
-      video.addEventListener('loadstart', () => {
-        // 광고풀 내부에서 다음 광고로 넘어가며 새 소스가 로드될 때도 계속 발생
-        if (state.adActive) video.muted = true; // 유튜브가 리셋한 muted를 다시 강제
-      });
-    }
+    let muteEnforcer = null;
 
     const adObserver = new MutationObserver(() => {
       const video = document.querySelector('video');
       const adShowing = !!document.querySelector('.ad-showing, .ytp-ad-player-overlay');
       if (!video) return;
-      hookVideoLoadEvents(video);
 
       if (adShowing && !state.adActive) {
         state.adActive = true;
         video.muted = true;
+        // 광고풀 내부에서 광고가 바뀔 때 유튜브가 muted를 자체적으로 리셋하는 경우가 있어서
+        // loadstart 이벤트로는 안 잡혀서(MSE 방식이라 새 리소스 로드 자체가 안 뜸), 폴링으로 강제 유지
+        muteEnforcer = setInterval(() => { if (!video.muted) video.muted = true; }, 250);
         if (cfg.muteDuringAd?.enabled && !state.storeClosed) playFiller();
       } else if (!adShowing && state.adActive) {
         state.adActive = false;
+        clearInterval(muteEnforcer);
+        muteEnforcer = null;
         stopFiller(cfg.muteDuringAd.fadeMs, () => { video.muted = false; });
       }
     });
@@ -126,17 +122,26 @@
       function playNext() {
         if (!state.adActive) return; // 광고가 이미 끝났으면 체인 중단
         if (state.storeClosed) return; // 재생 도중 마감 전환되면 체인 중단 (조용히 뮤트만 유지)
-        const url = idx < introTracks.length
-          ? introTracks[idx]
-          : (loopUrl || introTracks[introTracks.length - 1]); // filler 아직 없으면 마지막 프로모로 폴백
+        const isIntro = idx < introTracks.length; // promo1, promo2 구간인지
+        const url = isIntro ? introTracks[idx] : (loopUrl || introTracks[introTracks.length - 1]);
         idx++;
-        const a = new Audio(blobCache[url] || url);
-        a.volume = 0;
-        a.play().catch(() => {});
-        state.fillerAudio = a;
-        state.lastAudioAt = Date.now(); // 프로모 스케줄과 최소 간격 공유
-        fadeTo(a, 1, cfg.muteDuringAd.fadeMs);
-        a.addEventListener('ended', playNext); // 광고가 계속되면 다음 트랙으로 이어서
+
+        const startTrack = () => {
+          if (!state.adActive || state.storeClosed) return; // 차임 재생중 광고 끝났을 수 있으니 재확인
+          const a = new Audio(blobCache[url] || url);
+          a.volume = 0;
+          a.play().catch(() => {});
+          state.fillerAudio = a;
+          state.lastAudioAt = Date.now(); // 프로모 스케줄과 최소 간격 공유
+          fadeTo(a, 1, cfg.muteDuringAd.fadeMs);
+          a.addEventListener('ended', playNext); // 광고가 계속되면 다음 트랙으로 이어서
+        };
+
+        if (isIntro) {
+          playChime().then(startTrack); // promo1·promo2 앞에만 띵동
+        } else {
+          startTrack(); // 필러 루프 구간은 차임 없이 바로 이어붙임
+        }
       }
     }
 
