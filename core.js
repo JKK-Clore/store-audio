@@ -107,11 +107,11 @@
         state.adActive = false;
         clearInterval(muteEnforcer);
         muteEnforcer = null;
-        if (state.fillerAudio) {
-          // 지금 재생 중인 프로모/필러 트랙이 자연 종료될 때까지 대기 후 언뮤트
+        if (state.fillerChainActive) {
+          // 체인이 아직 진행 중(차임 대기중이든 트랙 재생중이든)이면 그게 다 끝날 때까지 대기 후 언뮤트
           state.pendingUnmute = () => { video.muted = false; };
         } else {
-          video.muted = false; // 재생 중인 트랙 자체가 없으면 바로 언뮤트
+          video.muted = false; // 체인 자체가 없으면 바로 언뮤트
         }
       }
     });
@@ -161,7 +161,7 @@
         if (!step.url) { state.fillerChainActive = false; return; }
 
         const startTrack = () => {
-          if (!state.adActive || state.storeClosed) { state.fillerChainActive = false; return; } // 차임 재생중 상태 바뀌었으면 중단
+          // 차임을 이미 시작한 이상 반드시 내용까지 재생 (차임+내용은 항상 하나의 단위체)
           const a = new Audio(blobCache[step.url] || step.url);
           a.volume = 0;
           a.play().catch(() => {});
@@ -207,8 +207,7 @@
         const track = cfg.audio.tracks[idx % cfg.audio.tracks.length];
         idx++;
         playChime().then(() => {
-          if (state.adActive || state.storeClosed) return; // 차임 재생 중 상태 바뀌었으면 취소
-          playOneShot(track, cfg.audio.volume);
+          playOneShot(track, cfg.audio.volume); // 차임을 시작한 이상 반드시 내용까지 재생
         });
       }, 30000); // 30초마다 조건 체크 (실제 재생은 gapMs 조건 만족할 때만)
     }
