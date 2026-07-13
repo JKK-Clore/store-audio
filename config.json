@@ -1,7 +1,8 @@
 {
   "muteDuringAd": {
     "enabled": true,
-    "fadeMs": 300
+    "fadeMs": 300,
+    "crossfadeMs": 700
   },
   "continueWatchingDialog": {
     "enabled": true,
