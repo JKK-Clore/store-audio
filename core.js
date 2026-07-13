@@ -112,8 +112,15 @@
     });
     adObserver.observe(document.body, { childList: true, subtree: true });
 
+    function isPromoActive(cfg) {
+      const until = cfg.audio?.activeUntil;
+      if (!until) return true; // 지정 안 하면 항상 활성
+      return new Date() <= new Date(`${until}T23:59:59`); // 그 날짜까지는 포함
+    }
+
     function playFiller() {
-      const [promo1, promo2] = cfg.audio?.tracks || [];
+      const active = isPromoActive(cfg);
+      const [promo1, promo2] = active ? (cfg.audio?.tracks || []) : []; // 만료되면 promo 자체를 없는 걸로 취급
       const loopUrl = cfg.filler?.track; // 시퀀스 끝난 뒤엔 이 트랙만 무한반복
 
       // 순서: promo1(차임) → filler → promo2(차임) → filler 이후 무한반복
@@ -180,6 +187,7 @@
       let idx = 0;
       const gapMs = cfg.audio.intervalMin * 60 * 1000;
       setInterval(() => {
+        if (!isPromoActive(cfg)) return; // 만료되면 정규 프로모 자체를 중단
         if (state.adActive) return;
         if (state.storeClosed) return; // 마감30분전~다음날오픈 전: 프로모 정지
         if (Date.now() - state.lastAudioAt < gapMs) return;
