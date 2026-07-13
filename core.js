@@ -105,12 +105,18 @@
         if (cfg.muteDuringAd?.enabled && !state.storeClosed) playFiller();
       } else if (!adShowing && state.adActive) {
         state.adActive = false;
-        clearInterval(muteEnforcer);
-        muteEnforcer = null;
+        // muteEnforcer는 여기서 바로 끄지 않음 — 필러가 아직 도는 동안 유튜브가 자체적으로
+        // muted를 풀어버려 필러랑 겹쳐 들리는 문제 방지, 실제 언뮤트되는 순간까지 계속 감시
         if (state.fillerChainActive) {
           // 체인이 아직 진행 중(차임 대기중이든 트랙 재생중이든)이면 그게 다 끝날 때까지 대기 후 언뮤트
-          state.pendingUnmute = () => { video.muted = false; };
+          state.pendingUnmute = () => {
+            clearInterval(muteEnforcer);
+            muteEnforcer = null;
+            video.muted = false;
+          };
         } else {
+          clearInterval(muteEnforcer);
+          muteEnforcer = null;
           video.muted = false; // 체인 자체가 없으면 바로 언뮤트
         }
       }
