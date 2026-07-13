@@ -89,10 +89,21 @@
 
     // ━━━ 1. 광고 진입/종료 감지 → mute + 필러 방송 (클릭/차단 없음, 광고는 자연 재생·자연 종료) ━━━
     // 필러 오디오는 프로모 트랙을 그대로 재사용 (별도 파일 불필요)
+    let hookedVideo = null;
+    function hookVideoLoadEvents(video) {
+      if (hookedVideo === video) return; // 이미 훅 걸린 엘리먼트면 중복 방지
+      hookedVideo = video;
+      video.addEventListener('loadstart', () => {
+        // 광고풀 내부에서 다음 광고로 넘어가며 새 소스가 로드될 때도 계속 발생
+        if (state.adActive) video.muted = true; // 유튜브가 리셋한 muted를 다시 강제
+      });
+    }
+
     const adObserver = new MutationObserver(() => {
       const video = document.querySelector('video');
       const adShowing = !!document.querySelector('.ad-showing, .ytp-ad-player-overlay');
       if (!video) return;
+      hookVideoLoadEvents(video);
 
       if (adShowing && !state.adActive) {
         state.adActive = true;
