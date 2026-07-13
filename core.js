@@ -369,13 +369,15 @@
 
     // ━━━ 유틸 ━━━
     function fadeTo(audio, target, ms, onDone) {
-      const steps = 10;
+      const steps = 24; // 10→24, 더 촘촘하게 (계단감 줄이기)
       const start = audio.volume;
       const stepMs = ms / steps;
       let i = 0;
       const t = setInterval(() => {
         i++;
-        audio.volume = start + (target - start) * (i / steps);
+        const progress = i / steps;
+        const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI); // 선형 대신 완만한 S자 곡선(raised-cosine)
+        audio.volume = start + (target - start) * eased;
         if (i >= steps) { clearInterval(t); onDone?.(); }
       }, stepMs);
     }
