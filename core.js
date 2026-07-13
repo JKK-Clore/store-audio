@@ -113,22 +113,30 @@
     adObserver.observe(document.body, { childList: true, subtree: true });
 
     function playFiller() {
-      const introTracks = cfg.audio?.tracks || []; // 고정 순서: promo1 → promo2
-      const loopUrl = cfg.filler?.track; // 그 이후엔 이 트랙만 반복
-      if (!introTracks.length && !loopUrl) return;
+      const [promo1, promo2] = cfg.audio?.tracks || [];
+      const loopUrl = cfg.filler?.track; // 시퀀스 끝난 뒤엔 이 트랙만 무한반복
+
+      // 순서: promo1(차임) → filler → promo2(차임) → filler 이후 무한반복
+      const sequence = [];
+      if (promo1) sequence.push({ url: promo1, chime: true });
+      if (loopUrl) sequence.push({ url: loopUrl, chime: false });
+      if (promo2) sequence.push({ url: promo2, chime: true });
+      const fallbackLoopUrl = loopUrl || sequence[sequence.length - 1]?.url; // filler 아직 없으면 마지막 트랙으로 폴백
+      if (!sequence.length && !fallbackLoopUrl) return;
+
       let idx = 0;
       playNext();
 
       function playNext() {
         if (!state.adActive) return; // 광고가 이미 끝났으면 체인 중단
         if (state.storeClosed) return; // 재생 도중 마감 전환되면 체인 중단 (조용히 뮤트만 유지)
-        const isIntro = idx < introTracks.length; // promo1, promo2 구간인지
-        const url = isIntro ? introTracks[idx] : (loopUrl || introTracks[introTracks.length - 1]);
+        const step = idx < sequence.length ? sequence[idx] : { url: fallbackLoopUrl, chime: false };
         idx++;
+        if (!step.url) return;
 
         const startTrack = () => {
           if (!state.adActive || state.storeClosed) return; // 차임 재생중 광고 끝났을 수 있으니 재확인
-          const a = new Audio(blobCache[url] || url);
+          const a = new Audio(blobCache[step.url] || step.url);
           a.volume = 0;
           a.play().catch(() => {});
           state.fillerAudio = a;
@@ -137,10 +145,10 @@
           a.addEventListener('ended', playNext); // 광고가 계속되면 다음 트랙으로 이어서
         };
 
-        if (isIntro) {
+        if (step.chime) {
           playChime().then(startTrack); // promo1·promo2 앞에만 띵동
         } else {
-          startTrack(); // 필러 루프 구간은 차임 없이 바로 이어붙임
+          startTrack(); // 필러 구간은 차임 없이 바로 이어붙임
         }
       }
     }
@@ -177,7 +185,10 @@
         if (Date.now() - state.lastAudioAt < gapMs) return;
         const track = cfg.audio.tracks[idx % cfg.audio.tracks.length];
         idx++;
-        playOneShot(track, cfg.audio.volume);
+        playChime().then(() => {
+          if (state.adActive || state.storeClosed) return; // 차임 재생 중 상태 바뀌었으면 취소
+          playOneShot(track, cfg.audio.volume);
+        });
       }, 30000); // 30초마다 조건 체크 (실제 재생은 gapMs 조건 만족할 때만)
     }
 
