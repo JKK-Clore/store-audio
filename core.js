@@ -12,7 +12,7 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
-    const state = { adActive: false, fillerAudio: null, pendingUnmute: null, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
+    const state = { adActive: false, fillerAudio: null, pendingUnmute: null, fillerChainActive: false, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
     const blobCache = {}; // url → objectURL
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
@@ -124,6 +124,9 @@
     }
 
     function playFiller() {
+      if (state.fillerChainActive) return; // 이미 체인 진행 중이면 중복 시작 방지 (플리커 재진입 대비)
+      state.fillerChainActive = true;
+
       const active = isPromoActive(cfg);
       const [promo1, promo2] = active ? (cfg.audio?.tracks || []) : []; // 만료되면 promo 자체를 없는 걸로 취급
       const loopUrl = cfg.filler?.track; // 시퀀스 끝난 뒤엔 이 트랙만 무한반복
@@ -134,15 +137,17 @@
       if (loopUrl) sequence.push({ url: loopUrl, chime: false });
       if (promo2) sequence.push({ url: promo2, chime: true });
       const fallbackLoopUrl = loopUrl || sequence[sequence.length - 1]?.url; // filler 아직 없으면 마지막 트랙으로 폴백
-      if (!sequence.length && !fallbackLoopUrl) return;
+      if (!sequence.length && !fallbackLoopUrl) { state.fillerChainActive = false; return; }
 
       let idx = 0;
       playNext();
 
       function playNext() {
+        state.fillerAudio = null; // 직전 트랙 정리 — 차임 대기 구간에 stale 참조가 남지 않도록 항상 여기서 정리
+
         if (!state.adActive) {
           // 광고는 끝났지만 방금 트랙이 끝났으니(자연종료) 이제 언뮤트 실행
-          state.fillerAudio = null;
+          state.fillerChainActive = false;
           if (state.pendingUnmute) {
             const done = state.pendingUnmute;
             state.pendingUnmute = null;
@@ -150,13 +155,13 @@
           }
           return;
         }
-        if (state.storeClosed) return; // 재생 도중 마감 전환되면 체인 중단 (조용히 뮤트만 유지)
+        if (state.storeClosed) { state.fillerChainActive = false; return; } // 재생 도중 마감 전환되면 체인 중단
         const step = idx < sequence.length ? sequence[idx] : { url: fallbackLoopUrl, chime: false };
         idx++;
-        if (!step.url) return;
+        if (!step.url) { state.fillerChainActive = false; return; }
 
         const startTrack = () => {
-          if (!state.adActive || state.storeClosed) return; // 차임 재생중 광고 끝났을 수 있으니 재확인
+          if (!state.adActive || state.storeClosed) { state.fillerChainActive = false; return; } // 차임 재생중 상태 바뀌었으면 중단
           const a = new Audio(blobCache[step.url] || step.url);
           a.volume = 0;
           a.play().catch(() => {});
@@ -217,6 +222,38 @@
     // unsafeWindow가 있으면(진짜 샌드박스) 그쪽에, 없으면(<script> 직접주입 등) window에 등록
     const globalTarget = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     globalTarget.closeCheckNow = () => checkClosing(cfg.closing);
+
+    // 디버그용: 광고 없이 콘솔에서 직접 오디오 흐름 테스트
+    globalTarget.playPromo = (n) => {
+      const tracks = cfg.audio?.tracks || [];
+      const url = tracks[(n - 1 + tracks.length) % tracks.length];
+      if (!url) { console.warn('[Clore Core] promo 트랙 없음'); return; }
+      console.log(`[Clore Core] promo${n} 직접 재생:`, url);
+      playOneShot(url, cfg.audio.volume);
+    };
+    globalTarget.playFillerTest = () => {
+      const video = document.querySelector('video');
+      if (!video) { console.warn('[Clore Core] video 못 찾음'); return; }
+      state.adActive = true;
+      video.muted = true;
+      console.log('[Clore Core] 필러체인 강제 시작 (실제 광고 없이 시뮬레이션)');
+      playFiller();
+    };
+    globalTarget.stopFillerTest = () => {
+      const video = document.querySelector('video');
+      state.adActive = false;
+      if (video) video.muted = false;
+      console.log('[Clore Core] 필러체인 강제 종료');
+    };
+    globalTarget.stateNow = () => {
+      console.log('[Clore Core] state:', {
+        adActive: state.adActive,
+        storeClosed: state.storeClosed,
+        fillerChainActive: state.fillerChainActive,
+        hasFillerAudio: !!state.fillerAudio,
+        hasPendingUnmute: !!state.pendingUnmute,
+      });
+    };
 
     const logBadge = (icon, label, bg) => {
       console.log(
@@ -329,5 +366,6 @@
 
     console.log('[Clore Core] 로딩 완료 (전 지점 공통)');
     console.log('[Clore Core] 테스트: testClosed() / testOpen() / testClear() 콘솔에서 바로 호출');
+    console.log('[Clore Core] 디버그: playPromo(1|2) / playFillerTest() / stopFillerTest() / stateNow()');
   }
 })();
