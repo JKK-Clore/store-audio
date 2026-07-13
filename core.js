@@ -12,8 +12,9 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
-    const state = { adActive: false, fillerAudio: null, pendingUnmute: null, fillerChainActive: false, currentIsFiller: false, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
+    const state = { adActive: false, fillerAudio: null, fillerGainNode: null, fillerAudioCtx: null, pendingUnmute: null, fillerChainActive: false, currentIsFiller: false, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
     const blobCache = {}; // url → objectURL
+    const safeGain = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : 1; }; // GainNode는 1 넘어도 진짜 증폭됨, 음수/이상값만 방지
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
     const allTracks = [
@@ -39,9 +40,15 @@
 
     function playOneShot(url, volume) {
       const src = blobCache[url] || url;
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const a = new Audio(src);
-      a.volume = volume ?? 1;
+      const source = audioCtx.createMediaElementSource(a);
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.value = safeGain(volume); // 1 넘는 값도 실제 증폭으로 반영됨
+      source.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
       a.play().catch(e => console.warn('[Clore Core] 재생 실패', url, e));
+      a.addEventListener('ended', () => audioCtx.close().catch(() => {}), { once: true });
       state.lastAudioAt = Date.now(); // 프로모/마감 공통 타임스탬프
     }
 
@@ -76,12 +83,19 @@
         count++;
         playChime().then(() => {
           const src = blobCache[url] || url;
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           const a = new Audio(src);
-          a.volume = volume ?? 1;
+          const source = audioCtx.createMediaElementSource(a);
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = safeGain(volume); // 1 넘는 값도 실제 증폭
+          source.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
           a.play().catch(e => console.warn('[Clore Core] 마감 안내 재생 실패', url, e));
           state.lastAudioAt = Date.now();
           if (count < repeat) {
             a.addEventListener('ended', () => setTimeout(playOnce, 1000));
+          } else {
+            a.addEventListener('ended', () => audioCtx.close().catch(() => {}), { once: true });
           }
         });
       }
@@ -118,11 +132,15 @@
         if (state.fillerChainActive && state.currentIsFiller && state.fillerAudio) {
           // 필러(배경음) 구간이면 굳이 끝까지 안 기다리고 바로 크로스페이드로 부드럽게 전환
           const filler = state.fillerAudio;
+          const fillerGain = state.fillerGainNode;
+          const fillerCtx = state.fillerAudioCtx;
           state.fillerAudio = null;
+          state.fillerGainNode = null;
+          state.fillerAudioCtx = null;
           state.fillerChainActive = false;
           state.pendingUnmute = null;
           fadeInVideo();
-          fadeTo(filler, 0, fadeMs, () => filler.pause()); // 필러 소리 서서히 내리기
+          fadeGainTo(fillerGain, 0, fadeMs, () => { filler.pause(); fillerCtx.close().catch(() => {}); }); // 필러 소리 서서히 내리기
         } else if (state.fillerChainActive) {
           // 프로모(차임+내용) 구간이면 기존처럼 끝까지 재생 후, 언뮤트는 여기도 부드럽게
           state.pendingUnmute = fadeInVideo;
@@ -159,7 +177,10 @@
       playNext();
 
       function playNext() {
-        state.fillerAudio = null; // 직전 트랙 정리 — 차임 대기 구간에 stale 참조가 남지 않도록 항상 여기서 정리
+        // 직전 트랙 정리 — 차임 대기 구간에 stale 참조가 남지 않도록 항상 여기서 정리
+        state.fillerAudio = null;
+        state.fillerGainNode = null;
+        if (state.fillerAudioCtx) { state.fillerAudioCtx.close().catch(() => {}); state.fillerAudioCtx = null; }
 
         if (!state.adActive) {
           // 광고는 끝났지만 방금 트랙이 끝났으니(자연종료) 이제 언뮤트 실행
@@ -179,12 +200,20 @@
         const startTrack = () => {
           // 차임을 이미 시작한 이상 반드시 내용까지 재생 (차임+내용은 항상 하나의 단위체)
           state.currentIsFiller = !step.chime; // 차임 없는 구간 = 배경음악(필러), 중간에 끊겨도 되는 구간
+          const targetVol = step.chime ? safeGain(cfg.audio?.volume) : 1; // 프로모=cfg.audio.volume(광고필러든 정규든 동일), 필러=고정 1
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           const a = new Audio(blobCache[step.url] || step.url);
-          a.volume = 0;
+          const source = audioCtx.createMediaElementSource(a);
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = 0;
+          source.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
           a.play().catch(() => {});
           state.fillerAudio = a;
+          state.fillerGainNode = gainNode;
+          state.fillerAudioCtx = audioCtx;
           state.lastAudioAt = Date.now(); // 프로모 스케줄과 최소 간격 공유
-          fadeTo(a, 1, cfg.muteDuringAd.fadeMs);
+          fadeGainTo(gainNode, targetVol, cfg.muteDuringAd.fadeMs);
           a.addEventListener('ended', playNext); // 광고가 계속되면 다음 트랙으로 이어서
         };
 
@@ -378,6 +407,21 @@
         const progress = i / steps;
         const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI); // 선형 대신 완만한 S자 곡선(raised-cosine)
         audio.volume = start + (target - start) * eased;
+        if (i >= steps) { clearInterval(t); onDone?.(); }
+      }, stepMs);
+    }
+
+    // GainNode용 페이드 (증폭값도 그대로 유지하면서 부드럽게 램프)
+    function fadeGainTo(gainNode, target, ms, onDone) {
+      const steps = 24;
+      const start = gainNode.gain.value;
+      const stepMs = ms / steps;
+      let i = 0;
+      const t = setInterval(() => {
+        i++;
+        const progress = i / steps;
+        const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI);
+        gainNode.gain.value = start + (target - start) * eased;
         if (i >= steps) { clearInterval(t); onDone?.(); }
       }, stepMs);
     }
