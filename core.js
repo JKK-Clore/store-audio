@@ -12,7 +12,7 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
-    const state = { adActive: false, fillerAudio: null, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
+    const state = { adActive: false, fillerAudio: null, pendingUnmute: null, closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false };
     const blobCache = {}; // url → objectURL
 
     // ━━━ 0. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
@@ -107,7 +107,12 @@
         state.adActive = false;
         clearInterval(muteEnforcer);
         muteEnforcer = null;
-        stopFiller(cfg.muteDuringAd.fadeMs, () => { video.muted = false; });
+        if (state.fillerAudio) {
+          // 지금 재생 중인 프로모/필러 트랙이 자연 종료될 때까지 대기 후 언뮤트
+          state.pendingUnmute = () => { video.muted = false; };
+        } else {
+          video.muted = false; // 재생 중인 트랙 자체가 없으면 바로 언뮤트
+        }
       }
     });
     adObserver.observe(document.body, { childList: true, subtree: true });
@@ -135,7 +140,16 @@
       playNext();
 
       function playNext() {
-        if (!state.adActive) return; // 광고가 이미 끝났으면 체인 중단
+        if (!state.adActive) {
+          // 광고는 끝났지만 방금 트랙이 끝났으니(자연종료) 이제 언뮤트 실행
+          state.fillerAudio = null;
+          if (state.pendingUnmute) {
+            const done = state.pendingUnmute;
+            state.pendingUnmute = null;
+            done();
+          }
+          return;
+        }
         if (state.storeClosed) return; // 재생 도중 마감 전환되면 체인 중단 (조용히 뮤트만 유지)
         const step = idx < sequence.length ? sequence[idx] : { url: fallbackLoopUrl, chime: false };
         idx++;
@@ -160,12 +174,6 @@
       }
     }
 
-    function stopFiller(fadeMs, onDone) {
-      if (!state.fillerAudio) { onDone?.(); return; }
-      const a = state.fillerAudio;
-      state.fillerAudio = null;
-      fadeTo(a, 0, fadeMs, () => { a.pause(); onDone?.(); });
-    }
 
     // ━━━ 2. "계속 시청하시겠습니까" 팝업 자동 확인 (안전망) ━━━
     if (cfg.continueWatchingDialog?.enabled) {
