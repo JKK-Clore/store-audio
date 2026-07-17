@@ -353,17 +353,14 @@
     // 광고 감지 (MutationObserver — 스로틀 비대상, 감지는 이거 하나로 충분)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const wiredVideos = new WeakSet();
-    function wireMuteGuard(video) { // 이벤트 기반 1차 안전망 (v3 승계 + pause 강제 추가)
+    function wireMuteGuard(video) { // 이벤트 기반 1차 안전망 (v3 승계)
       if (wiredVideos.has(video)) return;
       wiredVideos.add(video);
       const forceMute = () => { if (state.muteHold && !video.muted) video.muted = true; };
-      const forcePause = () => { if (state.storeClosed && !video.paused) video.pause(); };
       video.addEventListener('volumechange', forceMute);
       video.addEventListener('play', forceMute);
-      video.addEventListener('play', forcePause); // ← 재생 재개되는 즉시 재차 정지 (틈 원천봉쇄)
       video.addEventListener('loadeddata', forceMute);
       video.addEventListener('playing', forceMute);
-      video.addEventListener('playing', forcePause);
     }
 
     const adObserver = new MutationObserver(() => {
@@ -505,8 +502,6 @@
       const video = document.querySelector('video');
       // 뮤트 백업 (이벤트가 1차, 이건 놓쳤을 때 최대 250ms 내 교정)
       if (state.muteHold && video && !video.muted) video.muted = true;
-      // pause 백업 — storeClosed 중엔 재생 자체가 재개되지 않도록 지속 강제
-      if (state.storeClosed && video && !video.paused) video.pause();
       // 광고 스킵 — 항상 (storeClosed 여부 무관)
       if (state.adActive) {
         const skipBtn = document.querySelector(
