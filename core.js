@@ -15,12 +15,11 @@
     // 상태
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const state = {
-      storeClosed: false,
+      storeClosed: true,        // 안전기본값 — 실제상태 확정 전까지는 "닫힘"으로 간주 (false보다 실패시 피해 적음)
       lastDiffMin: null,        // 교차감지용 — 최초 로드 tick은 기록만 (소급재생 안 함)
       pendingPause: false,      // 체인/유닛 완주 후 pause 적용 (State Lock-in)
 
       adActive: false,
-      adManaged: false,         // 광고 시작 시점 storeClosed 스냅샷 (State Lock-in)
 
       chainActive: false,       // 광고체인 진행 중
       unitPlaying: false,       // 프로모 유닛(워치독 포함) 재생 중
@@ -339,7 +338,7 @@
       const n = state.lastPromoType === 1 ? 2 : 1; // 마지막의 반대
       console.log(`[Clore Core] 워치독 발동 → promo${n}`);
       await playPromoUnit(n);
-      if (state.adActive && state.adManaged) {
+      if (state.adActive) {
         runAdChain(true); // 재생 도중 광고 시작됨 → 필러부터 체인 인계
       } else {
         restoreVideo(CROSS_MS()); // CF2
@@ -354,14 +353,17 @@
     // 광고 감지 (MutationObserver — 스로틀 비대상, 감지는 이거 하나로 충분)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const wiredVideos = new WeakSet();
-    function wireMuteGuard(video) { // 이벤트 기반 1차 안전망 (v3 승계)
+    function wireMuteGuard(video) { // 이벤트 기반 1차 안전망 (v3 승계 + pause 강제 추가)
       if (wiredVideos.has(video)) return;
       wiredVideos.add(video);
       const forceMute = () => { if (state.muteHold && !video.muted) video.muted = true; };
+      const forcePause = () => { if (state.storeClosed && !video.paused) video.pause(); };
       video.addEventListener('volumechange', forceMute);
       video.addEventListener('play', forceMute);
+      video.addEventListener('play', forcePause); // ← 재생 재개되는 즉시 재차 정지 (틈 원천봉쇄)
       video.addEventListener('loadeddata', forceMute);
       video.addEventListener('playing', forceMute);
+      video.addEventListener('playing', forcePause);
     }
 
     const adObserver = new MutationObserver(() => {
@@ -371,22 +373,22 @@
       wireMuteGuard(video);
 
       if (adShowing && !state.adActive) {
-        // ── 광고 시작 ──
+        // ── 광고 시작 — 무음처리는 storeClosed 여부 무관하게 항상 ──
         state.adActive = true;
-        state.adManaged = !state.storeClosed; // State Lock-in 스냅샷
-        if (state.adManaged && cfg.muteDuringAd?.enabled) {
+        if (cfg.muteDuringAd?.enabled) {
           if (state.unitPlaying || state.chainActive || state.closePlaying) {
             // 다른 유닛 재생 중 — muteHold 이미 걸려있음, 종료 시 각자 인계 처리
           } else {
-            engageMute(); // 광고소리 즉시 컷 (침 시작 전 선제 뮤트)
-            runAdChain(false);
+            engageMute(); // 광고소리 즉시 컷 (storeClosed 여부와 무관)
+            if (!state.storeClosed) {
+              runAdChain(false); // 프로모/필러 콘텐츠는 영업중일 때만 (올스탑 원칙)
+            }
+            // storeClosed 중이면 무음만 유지 — 광고 끝나면 아래 종료분기에서 CF2
           }
         }
-        // unmanaged(storeClosed 중 시작) → 방치, 광고 끝날 때까지 개입 안 함
       } else if (!adShowing && state.adActive) {
         // ── 광고 종료 ──
         state.adActive = false;
-        state.adManaged = false;
         if (state.currentIsFiller && state.fillerAudio) {
           // 필러 중단 — CF1 + CF2 동시 (진짜 크로스페이드)
           const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
@@ -397,8 +399,11 @@
           });
           restoreVideo(CROSS_MS());
           if (wake) wake(); // while 루프 깨워서 정상 종료
+        } else if (!state.chainActive && !state.unitPlaying && !state.closePlaying && state.muteHold) {
+          // storeClosed 중 무음-only로 대응했던 광고 — 체인/유닛이 없었으니 여기서 직접 CF2
+          restoreVideo(CROSS_MS());
         }
-        // 프로모/마감 재생 중이면 → 아무것도 안 함 (완주 후 각자 CF2 처리, 이미 합의된 규칙)
+        // 체인/프로모/마감 재생 중이면 → 완주 후 각자 CF2 처리 (기존 규칙 그대로)
       }
     });
     adObserver.observe(document.body, { childList: true, subtree: true });
@@ -500,8 +505,10 @@
       const video = document.querySelector('video');
       // 뮤트 백업 (이벤트가 1차, 이건 놓쳤을 때 최대 250ms 내 교정)
       if (state.muteHold && video && !video.muted) video.muted = true;
-      // 광고 스킵 — 관리 대상 광고만 (adManaged 스냅샷 기준, State Lock-in)
-      if (state.adActive && state.adManaged) {
+      // pause 백업 — storeClosed 중엔 재생 자체가 재개되지 않도록 지속 강제
+      if (state.storeClosed && video && !video.paused) video.pause();
+      // 광고 스킵 — 항상 (storeClosed 여부 무관)
+      if (state.adActive) {
         const skipBtn = document.querySelector(
           '.ytp-skip-ad-button, .ytp-ad-skip-button, button.ytp-ad-skip-button-modern'
         );
@@ -599,17 +606,15 @@
       if (on) {
         if (state.adActive) { console.warn('[Clore Core] 이미 adActive=true'); return; }
         state.adActive = true;
-        state.adManaged = !state.storeClosed;
         console.log('[Clore Core] 🟠 광고 강제 시작 (시뮬레이션)');
-        if (state.adManaged && cfg.muteDuringAd?.enabled
+        if (cfg.muteDuringAd?.enabled
             && !state.unitPlaying && !state.chainActive && !state.closePlaying) {
           engageMute();
-          runAdChain(false);
+          if (!state.storeClosed) runAdChain(false);
         }
       } else {
         if (!state.adActive) { console.warn('[Clore Core] adActive 이미 false'); return; }
         state.adActive = false;
-        state.adManaged = false;
         console.log('[Clore Core] 🟢 광고 강제 종료 (시뮬레이션)');
         if (state.currentIsFiller && state.fillerAudio) {
           const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
@@ -617,6 +622,8 @@
           fadeGainTo(g, 0, CROSS_MS(), () => { a.pause(); try { g.disconnect(); s.disconnect(); } catch (_) {} });
           restoreVideo(CROSS_MS());
           if (wake) wake();
+        } else if (!state.chainActive && !state.unitPlaying && !state.closePlaying && state.muteHold) {
+          restoreVideo(CROSS_MS());
         }
       }
     };
@@ -629,7 +636,6 @@
         workerAlive: state.workerAlive,
         storeClosed: state.storeClosed,
         adActive: state.adActive,
-        adManaged: state.adManaged,
         chainActive: state.chainActive,
         unitPlaying: state.unitPlaying,
         closePlaying: state.closePlaying,
