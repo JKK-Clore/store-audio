@@ -3,7 +3,6 @@
 
   const BASE  = window.CLORE_BASE;
   const GMXHR = window.GM_xmlhttpRequest;
-
   if (!BASE) { console.error('[Clore Core] BASE 없음 — 로더 확인'); return; }
 
   fetch(`${BASE}/config.json?t=${Date.now()}`)
@@ -12,16 +11,38 @@
     .catch(e => console.error('[Clore Core] config 로드 실패', e));
 
   function init(cfg) {
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 상태
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const state = {
-      adActive: false,
-      fillerAudio: null, fillerGain: null, fillerSource: null,
-      pendingUnmute: null, fillerChainActive: false, currentIsFiller: false,
-      closedFlags: {}, lastAudioAt: Date.now(), storeClosed: false,
-    };
-    const blobCache = {}; // url → objectURL
+      storeClosed: false,
+      lastDiffMin: null,        // 교차감지용 — 최초 로드 tick은 기록만 (소급재생 안 함)
+      pendingPause: false,      // 체인/유닛 완주 후 pause 적용 (State Lock-in)
 
-    // ━━━ 0-A. 공용 AudioContext (누수·상한 도달로 인한 무음/지연 방지) ━━━
-    // 기존: 재생마다 new AudioContext() + playChime()은 close()조차 없음 → 문서당 ctx 상한(~6개) 도달
+      adActive: false,
+      adManaged: false,         // 광고 시작 시점 storeClosed 스냅샷 (State Lock-in)
+
+      chainActive: false,       // 광고체인 진행 중
+      unitPlaying: false,       // 프로모 유닛(워치독 포함) 재생 중
+      closePlaying: false,      // 마감방송 재생 중
+
+      currentIsFiller: false,
+      fillerAudio: null, fillerGain: null, fillerSource: null,
+      fillerResolve: null,      // 필러 중단 시 while 루프 깨우기
+
+      muteHold: false,          // 시스템이 뮤트를 유지해야 하는 구간
+      prevVolume: 1,            // CF2 복원 목표값
+
+      lastPromoType: 2,         // 마지막 프로모 (다음은 반대) — 초기 2 → 첫 워치독은 1
+      lastAudioAt: Date.now(),  // 15분 공백 감시 시계 (프로모1/2만 갱신, 필러 안 침)
+      workerAlive: false,       // true=Worker 정상가동, false=메인스레드 폴백
+    };
+    const blobCache = {};
+    const CROSS_MS = () => cfg.muteDuringAd?.crossfadeMs || 700;
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 공용 AudioContext + 볼륨 (지점배율 폐기 — config값 그대로)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     let sharedCtx = null;
     function getCtx() {
       if (!sharedCtx || sharedCtx.state === 'closed') {
@@ -30,103 +51,92 @@
       if (sharedCtx.state === 'suspended') sharedCtx.resume().catch(() => {});
       return sharedCtx;
     }
-
-    const branchVolumeMultiplier = () => {
-      const n = Number(window.CLORE_VOLUME_MULTIPLIER);
-      return Number.isFinite(n) && n > 0 ? n : 1;
-    };
     const safeGain = (v) => {
       const n = Number(v);
-      const base = Number.isFinite(n) && n >= 0 ? n : 1;
-      return base * branchVolumeMultiplier();
-    };
-    const duckLevel = () => {
-      const n = Number(cfg.audio?.duckVolume);
-      return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.05; // config에 없으면 기본 5%
+      return Number.isFinite(n) && n >= 0 ? n : 1;
     };
 
-    // ━━━ 0-B. 오디오 프리로드 (CSP 우회: GM_xmlhttpRequest → Blob) ━━━
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 오디오 프리로드 (GM_xmlhttpRequest → Blob, CSP 우회)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const allTracks = [
       ...(cfg.audio?.tracks || []),
       ...(cfg.filler?.track ? [cfg.filler.track] : []),
       ...cfg.closing.offsetsMin.map(m => `${cfg.closing.baseUrl}${m}m.mp3`),
     ];
     allTracks.forEach(preload);
-
     function preload(url) {
       if (!GMXHR) { blobCache[url] = url; return; }
       GMXHR({
-        method: 'GET',
-        url,
-        responseType: 'arraybuffer',
+        method: 'GET', url, responseType: 'arraybuffer',
         onload: (res) => {
-          const blob = new Blob([res.response], { type: 'audio/mpeg' });
-          blobCache[url] = URL.createObjectURL(blob);
+          blobCache[url] = URL.createObjectURL(new Blob([res.response], { type: 'audio/mpeg' }));
         },
-        onerror: () => console.warn('[Clore Core] 오디오 프리로드 실패', url),
+        onerror: () => console.warn('[Clore Core] 프리로드 실패', url),
       });
     }
 
-    // ━━━ 0-C. 재생 경로 단일화 ━━━
-    // 기존 playOneShot / playClosingSet / startTrack 3중복을 여기 하나로 통합
-    // 증폭 지연 해결: gain 확정 → ctx.resume() 완료 → canplaythrough 이후에만 play()
-    function createTrack(url, volume, fadeInMs = 0) {
-      return new Promise((resolve) => {
-        const ctx = getCtx();
-        const a = new Audio();
-        a.crossOrigin = 'anonymous';
-        a.preload = 'auto';
-        a.src = blobCache[url] || url;
-        if (!blobCache[url]) console.warn('[Clore Core] blob 미준비, 원격 URL로 재생:', url);
-
-        let source, gain;
-        try {
-          source = ctx.createMediaElementSource(a);
-          gain   = ctx.createGain();
-          source.connect(gain);
-          gain.connect(ctx.destination);
-        } catch (e) {
-          console.warn('[Clore Core] 그래프 생성 실패', url, e);
-          resolve(null);
-          return;
-        }
-
-        const targetGain = safeGain(volume);
-        gain.gain.value = fadeInMs > 0 ? 0.0001 : targetGain; // ★ play() 전에 확정
-
-        let settled = false;
-        const cleanup = () => { try { gain.disconnect(); source.disconnect(); } catch (_) {} };
-
-        const start = () => {
-          if (settled) return;
-          settled = true;
-          Promise.resolve(ctx.resume()).catch(() => {}).finally(() => {
-            a.play().catch(e => console.warn('[Clore Core] 재생 실패', url, e));
-            state.lastAudioAt = Date.now();
-            if (fadeInMs > 0) fadeGainTo(gain, targetGain, fadeInMs);
-            resolve({ audio: a, gain, source, cleanup });
-          });
-        };
-
-        a.addEventListener('ended', cleanup, { once: true });
-        a.addEventListener('error', () => {
-          if (settled) return;
-          settled = true;
-          console.warn('[Clore Core] 오디오 에러', url);
-          cleanup();
-          resolve(null);
-        }, { once: true });
-
-        if (a.readyState >= 3) start();
-        else a.addEventListener('canplaythrough', start, { once: true });
-        setTimeout(start, 3000); // 안전망: canplaythrough 미발화 대비
-      });
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 페이드 유틸 (v3 승계)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CF2 내부용 — 경과시간 기준이라 스로틀돼도 총 길이 유지
+    function fadeTo(el, target, ms, onDone) {
+      const token = (el.__cloreFade = (el.__cloreFade || 0) + 1);
+      const start = el.volume;
+      const t0 = performance.now();
+      (function tick() {
+        if (el.__cloreFade !== token) return;
+        const p = Math.min((performance.now() - t0) / ms, 1);
+        const eased = 0.5 - 0.5 * Math.cos(p * Math.PI);
+        el.volume = Math.min(1, Math.max(0, start + (target - start) * eased));
+        if (p < 1) setTimeout(tick, 25);
+        else onDone?.();
+      })();
+    }
+    // CF1 내부용 — 오디오 스레드 스케줄, 탭 상태 무관 정확
+    function fadeGainTo(gainNode, target, ms, onDone) {
+      if (!gainNode) { onDone?.(); return; }
+      const ctx = getCtx();
+      const g = gainNode.gain;
+      const t0 = ctx.currentTime;
+      try {
+        g.cancelScheduledValues(t0);
+        g.setValueAtTime(Math.max(g.value, 0.0001), t0);
+        g.linearRampToValueAtTime(Math.max(target, 0.0001), t0 + ms / 1000);
+      } catch (e) { g.value = target; }
+      if (onDone) setTimeout(onDone, ms + 60);
     }
 
-    // 삼단 3음 차임 (공용 ctx 사용 → 누수 없음)
-    function playChime() {
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // mute 걸기 / CF2 (유튜브 볼륨 복원 + unmute) — 멱등
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    function engageMute() {
+      const video = document.querySelector('video');
+      if (!video) return;
+      if (!state.muteHold) {
+        state.prevVolume = video.volume > 0 ? video.volume : 1;
+        state.muteHold = true;
+      }
+      video.muted = true; // 이미 true여도 무해 (멱등)
+    }
+    function restoreVideo(ms) { // = CF2
+      if (!state.muteHold) return; // 멱등 — 이중호출 안전
+      state.muteHold = false;
+      const video = document.querySelector('video');
+      if (!video) return;
+      video.muted = false;
+      video.volume = 0;
+      fadeTo(video, state.prevVolume, ms || CROSS_MS());
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 침 (볼륨 = 해당 유닛 config값 따라감, 지점배율 없음)
+    // 오실레이터 증폭은 클리핑 유발 → 0.4×volume, 상한 1.0
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    function playChime(volume) {
       return new Promise((resolve) => {
         const ctx = getCtx();
+        const peak = Math.min(0.4 * safeGain(volume), 1.0);
         const notes = [523, 659, 784];
         notes.forEach((freq, i) => {
           const osc  = ctx.createOscillator();
@@ -136,7 +146,7 @@
           osc.type = 'sine';
           osc.frequency.value = freq;
           const t = ctx.currentTime + i * 0.35;
-          gain.gain.setValueAtTime(0.4 * branchVolumeMultiplier(), t);
+          gain.gain.setValueAtTime(peak, t);
           gain.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
           osc.start(t);
           osc.stop(t + 0.6);
@@ -146,65 +156,208 @@
       });
     }
 
-    // ━━━ 0-D. 덕킹 (프로모/마감 안내 시 유튜브 음악 낮추기) ━━━
-    // 기존에 정규 프로모 경로엔 덕킹이 아예 없었음 → 음악 위에 프로모가 그대로 겹쳐 나감
-    const duck = { depth: 0, prevVol: 1, saved: false };
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 트랙 재생 (v3 승계 — gain 확정 → resume → canplaythrough 후 play)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    function createTrack(url, volume, fadeInMs = 0) {
+      return new Promise((resolve) => {
+        const ctx = getCtx();
+        const a = new Audio();
+        a.crossOrigin = 'anonymous';
+        a.preload = 'auto';
+        a.src = blobCache[url] || url;
+        if (!blobCache[url]) console.warn('[Clore Core] blob 미준비 — 원격 재생:', url);
 
-    function duckVideo() {
-      const video = document.querySelector('video');
-      duck.depth++;
-      if (duck.depth > 1 || !video) return;
-      if (video.muted) return; // 광고 뮤트 중이면 건드릴 필요 없음
-      duck.prevVol = video.volume;
-      duck.saved = true;
-      fadeTo(video, duck.prevVol * duckLevel(), 400);
-    }
+        let source, gain;
+        try {
+          source = ctx.createMediaElementSource(a);
+          gain   = ctx.createGain();
+          source.connect(gain);
+          gain.connect(ctx.destination);
+        } catch (e) { console.warn('[Clore Core] 그래프 생성 실패', url, e); resolve(null); return; }
 
-    function unduckVideo() {
-      duck.depth = Math.max(0, duck.depth - 1);
-      if (duck.depth > 0 || !duck.saved) return;
-      const video = document.querySelector('video');
-      duck.saved = false;
-      if (!video) return;
-      fadeTo(video, duck.prevVol, 700);
-    }
+        const targetGain = safeGain(volume);
+        gain.gain.value = fadeInMs > 0 ? 0.0001 : targetGain;
 
-    // ━━━ 0-E. 프로모 / 마감 안내 (덕킹 포함) ━━━
-    async function playPromoDucked(url, volume) {
-      duckVideo();
-      await playChime(); // 차임을 시작한 이상 내용까지 반드시 재생
-      const t = await createTrack(url, volume);
-      if (!t) { unduckVideo(); return; }
-      t.audio.addEventListener('ended', unduckVideo, { once: true });
-    }
-
-    // 마감 안내 세트: (띵동 → 오디오) × repeat, 세트 사이 1초 간격
-    async function playClosingSet(url, volume, repeat) {
-      duckVideo();
-      let count = 0;
-      const step = async () => {
-        count++;
-        await playChime();
-        const t = await createTrack(url, volume);
-        if (!t) { unduckVideo(); return; }
-        t.audio.addEventListener('ended', () => {
-          if (count < repeat) setTimeout(step, 1000);
-          else unduckVideo();
+        let settled = false;
+        const cleanup = () => { try { gain.disconnect(); source.disconnect(); } catch (_) {} };
+        const start = () => {
+          if (settled) return;
+          settled = true;
+          Promise.resolve(ctx.resume()).catch(() => {}).finally(() => {
+            a.play().catch(e => console.warn('[Clore Core] 재생 실패', url, e));
+            if (fadeInMs > 0) fadeGainTo(gain, targetGain, fadeInMs);
+            resolve({ audio: a, gain, source, cleanup });
+          });
+        };
+        a.addEventListener('ended', cleanup, { once: true });
+        a.addEventListener('error', () => {
+          if (settled) return;
+          settled = true;
+          console.warn('[Clore Core] 오디오 에러', url);
+          cleanup();
+          resolve(null);
         }, { once: true });
-      };
-      step();
+        if (a.readyState >= 3) start();
+        else a.addEventListener('canplaythrough', start, { once: true });
+        setTimeout(start, 3000);
+      });
     }
 
-    // ━━━ 1. 광고 진입/종료 감지 → mute + 필러 방송 ━━━
-    let muteEnforcer = null;
-    const wiredVideos = new WeakSet();
+    // ━━━ 트랙종료 대기 — 'ended' 또는 타임아웃 중 먼저 오는 쪽 (무기한 침묵 방지 안전판) ━━━
+    function waitTrackEnded(audio, maxMs) {
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        audio.addEventListener('ended', finish, { once: true });
+        const timer = setTimeout(() => {
+          console.warn('[Clore Core] ⚠ 트랙 타임아웃(' + maxMs + 'ms) — 강제 종료 후 다음 단계로', audio.src);
+          try { audio.pause(); } catch (_) {}
+          finish();
+        }, maxMs);
+      });
+    }
 
-    // 백그라운드 탭에서 setInterval은 최소 1000ms로 클램프됨 → 폴링만으론 최대 1초 소리 샘
-    // 이벤트는 스로틀 영향을 안 받으므로 이벤트가 1차, 폴링은 백업
-    function wireMuteGuard(video) {
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Promo Unit (원자성: 침 + 트랙 + mute 한 몸) — unmute는 밖에서
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const isPromoActive = () => {
+      const until = cfg.audio?.activeUntil;
+      if (!until) return true;
+      return new Date() <= new Date(`${until}T23:59:59`);
+    };
+
+    async function playPromoUnit(n) {
+      const url = cfg.audio?.tracks?.[n - 1];
+      if (!url) { console.warn(`[Clore Core] promo${n} 트랙 없음`); return; }
+      state.unitPlaying = true;
+      state.lastAudioAt = Date.now(); // 재생 시작 시점에도 갱신 (재생 중 워치독 중복트리거 방지)
+      engageMute();
+      await playChime(cfg.audio?.volume);
+      const t = await createTrack(url, cfg.audio?.volume);
+      if (t) await waitTrackEnded(t.audio, 60000);
+      state.lastPromoType = n;
+      state.lastAudioAt = Date.now(); // 종료 시점 갱신 → 여기서부터 15분 카운트
+      state.unitPlaying = false;
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 마감방송 유닛 — 30분=1회 / 15,5,2분=2연속 (mute 1번, CF2 1번)
+    // storeClosed=true 예외로 항상 작동
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    async function playClose(min) {
+      const url = `${cfg.closing.baseUrl}${min}m.mp3`;
+      const repeat = min === 30 ? 1 : 2;
+      state.closePlaying = true;
+      engageMute();
+      for (let i = 0; i < repeat; i++) {
+        await playChime(cfg.closing?.volume);
+        const t = await createTrack(url, cfg.closing?.volume);
+        if (t) await waitTrackEnded(t.audio, 60000);
+        if (i < repeat - 1) await new Promise(r => setTimeout(r, 1000));
+      }
+      state.closePlaying = false;
+      restoreVideo(CROSS_MS()); // CF2 — pause 상태면 사실상 무해, 연장청취 중이면 자연 복원
+      console.log(`[Clore Core] 마감 ${min}분 방송 완료 (${repeat}회)`);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 필러 1회 재생 — 중단 가능 (광고 끝나면 즉시 크로스페이드)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    function playFillerOnce() {
+      return new Promise(async (resolve) => {
+        const url = cfg.filler?.track;
+        if (!url) { resolve(); return; }
+        const t = await createTrack(url, 1, cfg.muteDuringAd?.fadeMs || 300); // 필러 볼륨 고정 1
+        if (!t) { setTimeout(resolve, 500); return; }
+        state.currentIsFiller = true;
+        state.fillerAudio = t.audio;
+        state.fillerGain  = t.gain;
+        state.fillerSource = t.source;
+        let timer;
+        const finish = () => {
+          clearTimeout(timer);
+          state.currentIsFiller = false;
+          state.fillerAudio = null; state.fillerGain = null; state.fillerSource = null;
+          state.fillerResolve = null;
+          resolve();
+        };
+        state.fillerResolve = finish; // 중단 경로 (observer/simulateAd가 호출)
+        t.audio.addEventListener('ended', finish, { once: true });
+        timer = setTimeout(() => {
+          console.warn('[Clore Core] ⚠ 필러 타임아웃(300000ms) — 강제 종료 후 다음 단계로', url);
+          try { t.audio.pause(); } catch (_) {}
+          finish();
+        }, 300000); // 5분 상한 — 필러는 배경트랙이라 프로모보다 길게 잡음
+      });
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 광고체인: 프로모1 → 필러 → 프로모2 → 필러 무한 (광고 끝날 때까지)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    async function runAdChain(startAtFiller = false) {
+      if (state.chainActive) return;
+      state.chainActive = true;
+
+      if (!startAtFiller && isPromoActive()) {
+        await playPromoUnit(1); // 잠김 — 광고가 먼저 끝나도 완주
+        if (!state.adActive) { restoreVideo(CROSS_MS()); finishChain(); return; }
+      }
+
+      let promo2Done = false;
+      while (state.adActive) {
+        await playFillerOnce(); // 자연종료 or 중단(observer가 크로스페이드+resolve)
+        if (!state.adActive) break;
+        if (!promo2Done && isPromoActive()) {
+          await playPromoUnit(2); // 잠김
+          promo2Done = true;
+          if (!state.adActive) { restoreVideo(CROSS_MS()); break; }
+        }
+      }
+
+      restoreVideo(CROSS_MS()); // 멱등 — 중단경로에서 이미 실행됐으면 no-op
+      finishChain();
+    }
+    function finishChain() {
+      state.chainActive = false;
+      if (state.pendingPause && state.storeClosed) {
+        document.querySelector('video')?.pause();
+        state.pendingPause = false;
+        console.log('[Clore Core] 체인 완주 후 pause 적용 (State Lock-in)');
+      }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 워치독 프로모 (15분 공백 감시 발동)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    async function watchdogFire() {
+      const n = state.lastPromoType === 1 ? 2 : 1; // 마지막의 반대
+      console.log(`[Clore Core] 워치독 발동 → promo${n}`);
+      await playPromoUnit(n);
+      if (state.adActive && state.adManaged) {
+        runAdChain(true); // 재생 도중 광고 시작됨 → 필러부터 체인 인계
+      } else {
+        restoreVideo(CROSS_MS()); // CF2
+        if (state.pendingPause && state.storeClosed) {
+          document.querySelector('video')?.pause();
+          state.pendingPause = false;
+        }
+      }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 광고 감지 (MutationObserver — 스로틀 비대상, 감지는 이거 하나로 충분)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const wiredVideos = new WeakSet();
+    function wireMuteGuard(video) { // 이벤트 기반 1차 안전망 (v3 승계)
       if (wiredVideos.has(video)) return;
       wiredVideos.add(video);
-      const forceMute = () => { if (state.adActive && !video.muted) video.muted = true; };
+      const forceMute = () => { if (state.muteHold && !video.muted) video.muted = true; };
       video.addEventListener('volumechange', forceMute);
       video.addEventListener('play', forceMute);
       video.addEventListener('loadeddata', forceMute);
@@ -218,109 +371,119 @@
       wireMuteGuard(video);
 
       if (adShowing && !state.adActive) {
+        // ── 광고 시작 ──
         state.adActive = true;
-        video.muted = true;
-        muteEnforcer = setInterval(() => { if (!video.muted) video.muted = true; }, 250); // 백업
-        if (cfg.muteDuringAd?.enabled && !state.storeClosed) playFiller();
-      } else if (!adShowing && state.adActive) {
-        state.adActive = false;
-        const fadeMs = cfg.muteDuringAd.crossfadeMs || 700;
-
-        const fadeInVideo = () => {
-          clearInterval(muteEnforcer);
-          muteEnforcer = null;
-          // 덕킹 중에 광고가 끼어든 경우, 덕킹된 값(0.05)이 아니라 원래 볼륨으로 복귀해야 함
-          const targetVolume = duck.saved ? duck.prevVol : (video.volume || 1);
-          video.muted = false;
-          video.volume = 0;
-          fadeTo(video, targetVolume, fadeMs);
-        };
-
-        if (state.fillerChainActive && state.currentIsFiller && state.fillerAudio) {
-          const filler     = state.fillerAudio;
-          const fillerGain = state.fillerGain;
-          const fillerSrc  = state.fillerSource;
-          state.fillerAudio = null;
-          state.fillerGain = null;
-          state.fillerSource = null;
-          state.fillerChainActive = false;
-          state.pendingUnmute = null;
-          fadeInVideo();
-          fadeGainTo(fillerGain, 0, fadeMs, () => {
-            filler.pause();
-            try { fillerGain.disconnect(); fillerSrc.disconnect(); } catch (_) {}
-          });
-        } else if (state.fillerChainActive) {
-          state.pendingUnmute = fadeInVideo; // 프로모(차임+내용) 구간은 끝까지 재생 후 언뮤트
-        } else {
-          fadeInVideo();
+        state.adManaged = !state.storeClosed; // State Lock-in 스냅샷
+        if (state.adManaged && cfg.muteDuringAd?.enabled) {
+          if (state.unitPlaying || state.chainActive || state.closePlaying) {
+            // 다른 유닛 재생 중 — muteHold 이미 걸려있음, 종료 시 각자 인계 처리
+          } else {
+            engageMute(); // 광고소리 즉시 컷 (침 시작 전 선제 뮤트)
+            runAdChain(false);
+          }
         }
+        // unmanaged(storeClosed 중 시작) → 방치, 광고 끝날 때까지 개입 안 함
+      } else if (!adShowing && state.adActive) {
+        // ── 광고 종료 ──
+        state.adActive = false;
+        state.adManaged = false;
+        if (state.currentIsFiller && state.fillerAudio) {
+          // 필러 중단 — CF1 + CF2 동시 (진짜 크로스페이드)
+          const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
+          const wake = state.fillerResolve;
+          fadeGainTo(g, 0, CROSS_MS(), () => {
+            a.pause();
+            try { g.disconnect(); s.disconnect(); } catch (_) {}
+          });
+          restoreVideo(CROSS_MS());
+          if (wake) wake(); // while 루프 깨워서 정상 종료
+        }
+        // 프로모/마감 재생 중이면 → 아무것도 안 함 (완주 후 각자 CF2 처리, 이미 합의된 규칙)
       }
     });
     adObserver.observe(document.body, { childList: true, subtree: true });
 
-    function isPromoActive(cfg) {
-      const until = cfg.audio?.activeUntil;
-      if (!until) return true;
-      return new Date() <= new Date(`${until}T23:59:59`);
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 영업시간 계산 (확정 표: 여름 21/20/18, 겨울 20/19/18, 오픈 09:30·일 11:00)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    function firstMonday(year, monthIdx) {
+      const d = new Date(year, monthIdx, 1);
+      while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    function isSummerSeason(now) {
+      const y = now.getFullYear();
+      return now >= firstMonday(y, 4) && now < firstMonday(y, 8);
+    }
+    function getCloseTime(now) {
+      const mode = isSummerSeason(now) ? cfg.closing.hours.summer : cfg.closing.hours.winter;
+      const day = now.getDay();
+      const hm = day === 0 ? mode.sun : day === 6 ? mode.sat : mode.monFri;
+      const [h, m] = hm.split(':').map(Number);
+      const t = new Date(now);
+      t.setHours(h, m, 0, 0);
+      return t;
+    }
+    function getOpenTime(now) {
+      const hm = now.getDay() === 0 ? cfg.closing.open.sun : cfg.closing.open.monSat;
+      const [h, m] = hm.split(':').map(Number);
+      const t = new Date(now);
+      t.setHours(h, m, 0, 0);
+      return t;
+    }
+    function minsToClose(now) {
+      return (getCloseTime(now) - now) / 60000;
     }
 
-    function playFiller() {
-      if (state.fillerChainActive) return;
-      state.fillerChainActive = true;
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // TICK 판정 (Worker 1초 tick마다 실행)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    function evaluateTick() {
+      const now = new Date();
+      const diff = minsToClose(now);
 
-      const active = isPromoActive(cfg);
-      const [promo1, promo2] = active ? (cfg.audio?.tracks || []) : [];
-      const loopUrl = cfg.filler?.track;
-
-      const sequence = [];
-      if (promo1) sequence.push({ url: promo1, chime: true });
-      if (loopUrl) sequence.push({ url: loopUrl, chime: false });
-      if (promo2) sequence.push({ url: promo2, chime: true });
-      const fallbackLoopUrl = loopUrl || sequence[sequence.length - 1]?.url;
-      if (!sequence.length && !fallbackLoopUrl) { state.fillerChainActive = false; return; }
-
-      let idx = 0;
-      playNext();
-
-      async function playNext() {
-        // 직전 트랙 참조 정리 (차임 대기 구간에 stale 참조 남지 않게)
-        state.fillerAudio = null;
-        state.fillerGain = null;
-        state.fillerSource = null;
-
-        if (!state.adActive) {
-          state.fillerChainActive = false;
-          if (state.pendingUnmute) {
-            const done = state.pendingUnmute;
-            state.pendingUnmute = null;
-            done();
-          }
-          return;
-        }
-        if (state.storeClosed) { state.fillerChainActive = false; return; }
-
-        const step = idx < sequence.length ? sequence[idx] : { url: fallbackLoopUrl, chime: false };
-        idx++;
-        if (!step.url) { state.fillerChainActive = false; return; }
-
-        if (step.chime) await playChime(); // promo1·promo2 앞에만 띵동
-
-        state.currentIsFiller = !step.chime;
-        const vol = step.chime ? cfg.audio?.volume : 1; // 프로모=cfg값, 필러=1 (둘 다 지점배율 적용)
-        const t = await createTrack(step.url, vol, cfg.muteDuringAd.fadeMs);
-        if (!t) { setTimeout(playNext, 500); return; } // 트랙 실패해도 체인 안 끊기게
-
-        state.fillerAudio = t.audio;
-        state.fillerGain = t.gain;
-        state.fillerSource = t.source;
-        t.audio.addEventListener('ended', playNext, { once: true });
+      // 1) 마감방송 교차감지 — storeClosed 무관하게 항상 (예외 규정)
+      //    첫 tick은 기록만 (지나친 안내 소급재생 안 함)
+      if (state.lastDiffMin !== null) {
+        cfg.closing.offsetsMin.forEach(min => {
+          if (state.lastDiffMin > min && diff <= min && diff > 0) playClose(min);
+        });
       }
-    }
+      state.lastDiffMin = diff;
 
-    // ━━━ 2. "계속 시청하시겠습니까" 팝업 자동 확인 ━━━
-    if (cfg.continueWatchingDialog?.enabled) {
-      setInterval(() => {
+      // 2) storeClosed 판정 (override → 마감30분전 → 오픈전)
+      const override = localStorage.getItem('clore_test_closed');
+      let closed;
+      if (override === 'closed') closed = true;
+      else if (override === 'open') closed = false;
+      else closed = (diff <= 30) || (now < getOpenTime(now));
+
+      if (closed && !state.storeClosed) {
+        state.storeClosed = true;
+        if (state.chainActive || state.unitPlaying) {
+          state.pendingPause = true; // 재생 유닛 완주 후 pause (State Lock-in)
+        } else {
+          document.querySelector('video')?.pause(); // 1회만 — 수동 재생은 안 막음
+        }
+        console.log('[Clore Core] storeClosed → true (올스탑, 마감방송만 예외)');
+      } else if (!closed && state.storeClosed) {
+        state.storeClosed = false;
+        state.pendingPause = false;
+        state.lastDiffMin = null; // 리셋 (false→true→false 전환 = 하루 경계)
+        document.querySelector('video')?.play().catch(() => {});
+        console.log('[Clore Core] storeClosed → false (재개장, 판정상태 리셋)');
+      }
+
+      // 3) 워치독 — 15분 프로모 공백 감시 (기존 TICK에 조건 하나, 별도 폴링 없음)
+      if (cfg.audio?.enabled && isPromoActive()
+          && !state.storeClosed && !state.adActive
+          && !state.chainActive && !state.unitPlaying && !state.closePlaying
+          && Date.now() - state.lastAudioAt >= cfg.audio.intervalMin * 60 * 1000) {
+        watchdogFire();
+      }
+
+      // 4) Continue Watching 팝업 (v3 승계, storeClosed=true면 정지 — 올스탑 원칙)
+      if (cfg.continueWatchingDialog?.enabled && !state.storeClosed) {
         const official = document.querySelector('.ytp-confirm-dialog-renderer-button-primary');
         if (official) { official.click(); return; }
         const fallback = [...document.querySelectorAll('button')].find(b =>
@@ -329,214 +492,159 @@
         if (fallback && /paused|continue watching|일시정지/i.test(document.body.innerText || '')) {
           fallback.click();
         }
-      }, cfg.continueWatchingDialog.pollMs);
+      }
     }
 
-    // ━━━ 3. 프로모 방송 — "마지막 방송 후 경과시간" 기준 + 덕킹 ━━━
-    if (cfg.audio?.enabled) {
-      let idx = 0;
-      const gapMs = cfg.audio.intervalMin * 60 * 1000;
-      setInterval(() => {
-        if (!isPromoActive(cfg)) return;
-        if (state.adActive) return;
-        if (state.storeClosed) return;
-        if (duck.depth > 0) return; // 이미 다른 안내 나가는 중이면 겹치지 않게
-        if (Date.now() - state.lastAudioAt < gapMs) return;
-        const track = cfg.audio.tracks[idx % cfg.audio.tracks.length];
-        idx++;
-        state.lastAudioAt = Date.now(); // 차임 대기 중 중복 트리거 방지
-        playPromoDucked(track, cfg.audio.volume);
-      }, 30000);
+    // MUTE_TICK 판정 (Worker 250ms tick마다) — 백업 폴링 + 스킵버튼
+    function evaluateMuteTick() {
+      const video = document.querySelector('video');
+      // 뮤트 백업 (이벤트가 1차, 이건 놓쳤을 때 최대 250ms 내 교정)
+      if (state.muteHold && video && !video.muted) video.muted = true;
+      // 광고 스킵 — 관리 대상 광고만 (adManaged 스냅샷 기준, State Lock-in)
+      if (state.adActive && state.adManaged) {
+        const skipBtn = document.querySelector(
+          '.ytp-skip-ad-button, .ytp-ad-skip-button, button.ytp-ad-skip-button-modern'
+        );
+        if (skipBtn) skipBtn.click();
+      }
     }
 
-    // ━━━ 4. 마감 방송 + 영업시간 외 정지 ━━━
-    checkClosing(cfg.closing);
-    setInterval(() => checkClosing(cfg.closing), 30000);
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Web Worker (Dumb Clock — 인라인, 상태·판단·네트워크 없음)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    (function startWorker() {
+      const workerSrc = [
+        "setInterval(function(){ postMessage({type:'TICK'}); }, 1000);",
+        "setInterval(function(){ postMessage({type:'MUTE_TICK'}); }, 250);",
+      ].join('\n');
+      try {
+        const blobUrl = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
+        let workerUrl = blobUrl;
+        if (window.trustedTypes && trustedTypes.createPolicy) {
+          try {
+            const p = trustedTypes.createPolicy('clore-worker', { createScriptURL: s => s });
+            workerUrl = p.createScriptURL(blobUrl);
+          } catch (_) {}
+        }
+        const worker = new Worker(workerUrl);
+        worker.onmessage = (e) => {
+          if (e.data?.type === 'TICK') evaluateTick();
+          else if (e.data?.type === 'MUTE_TICK') evaluateMuteTick();
+        };
+        state.workerAlive = true;
+        console.log('[Clore Core] Worker 가동 ✓ (백그라운드 스로틀 면역)');
+      } catch (e) {
+        // 안전망: Worker 생성 실패 시 메인스레드 타이머로 폴백 (스로틀 감수)
+        state.workerAlive = false;
+        console.warn('[Clore Core] Worker 생성 실패 — 메인스레드 폴백', e);
+        setInterval(evaluateTick, 1000);
+        setInterval(evaluateMuteTick, 250);
+      }
+    })();
 
-    // ━━━ 5. 탭 복귀 시 상태 재동기화 (스로틀로 놓친 판정 복구) ━━━
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 탭 복귀 재동기화 (v3 승계 — Worker 메시지 유실 대비 이중 안전망)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      checkClosing(cfg.closing);
+      evaluateTick();
       const video = document.querySelector('video');
       if (!video) return;
       wireMuteGuard(video);
-      if (!state.adActive && !state.storeClosed && video.muted) video.muted = false;
-      if (!state.adActive && duck.depth === 0 && duck.saved) {
-        duck.saved = false;
-        video.volume = duck.prevVol; // 페이드 중 스로틀로 멈춘 경우 즉시 복구
+      if (!state.muteHold && !state.adActive && !state.storeClosed && video.muted) {
+        video.muted = false;
       }
     });
 
-    // ━━━ 디버그 ━━━
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 콘솔 커맨드
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const globalTarget = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    globalTarget.closeCheckNow = () => checkClosing(cfg.closing);
-
-    globalTarget.playPromo = (n) => {
-      const tracks = cfg.audio?.tracks || [];
-      const url = tracks[(n - 1 + tracks.length) % tracks.length];
-      if (!url) { console.warn('[Clore Core] promo 트랙 없음'); return; }
-      console.log(`[Clore Core] promo${n} 덕킹 재생:`, url);
-      playPromoDucked(url, cfg.audio.volume);
-    };
-    globalTarget.playFillerTest = () => {
-      const video = document.querySelector('video');
-      if (!video) { console.warn('[Clore Core] video 못 찾음'); return; }
-      state.adActive = true;
-      video.muted = true;
-      console.log('[Clore Core] 필러체인 강제 시작');
-      playFiller();
-    };
-    globalTarget.stopFillerTest = () => {
-      const video = document.querySelector('video');
-      state.adActive = false;
-      if (video) video.muted = false;
-      console.log('[Clore Core] 필러체인 강제 종료');
-    };
-    globalTarget.stateNow = () => {
-      console.log('[Clore Core] state:', {
-        adActive: state.adActive,
-        storeClosed: state.storeClosed,
-        fillerChainActive: state.fillerChainActive,
-        hasFillerAudio: !!state.fillerAudio,
-        hasPendingUnmute: !!state.pendingUnmute,
-        duckDepth: duck.depth,
-        ctxState: sharedCtx ? sharedCtx.state : 'none',
-        tabVisible: document.visibilityState,
-      });
-    };
-
     const logBadge = (icon, label, bg) => {
       console.log(
         `%c${icon} ${label} → storeClosed=${state.storeClosed}`,
         `color:#fff;background:${bg};padding:2px 8px;border-radius:4px;font-weight:bold;`
       );
     };
+
     globalTarget.testClosed = () => {
       localStorage.setItem('clore_test_closed', 'closed');
-      checkClosing(cfg.closing);
-      logBadge('🔴', 'CLOSED 강제 적용', '#c0392b');
+      evaluateTick(); // 즉시 반영 (다음 TICK 안 기다림)
+      logBadge('🔴', 'CLOSED 강제', '#c0392b');
     };
     globalTarget.testOpen = () => {
       localStorage.setItem('clore_test_closed', 'open');
-      checkClosing(cfg.closing);
-      logBadge('🟢', 'OPEN 강제 적용', '#27ae60');
+      evaluateTick();
+      logBadge('🟢', 'OPEN 강제', '#27ae60');
     };
     globalTarget.testClear = () => {
       localStorage.removeItem('clore_test_closed');
-      checkClosing(cfg.closing);
-      logBadge('⚪', '오버라이드 해제(실제시각 기준)', '#7f8c8d');
+      evaluateTick();
+      logBadge('⚪', '오버라이드 해제 (실제시각)', '#7f8c8d');
     };
 
-    console.log(
-      '[Clore Core] 노출 진단 — unsafeWindow존재:', typeof unsafeWindow !== 'undefined',
-      '| window===globalTarget:', window === globalTarget,
-      '| typeof window.testClear:', typeof window.testClear
-    );
-
-    function checkClosing(closing) {
-      const now = new Date();
-      const target = getCloseTime(now, closing);
-      const diffMin = (target - now) / 60000;
-
-      // 기존 |diffMin - min| < 0.5 는 엣지트리거 → 백그라운드 탭 스로틀 시 윈도우를 통째로 건너뜀
-      // 2분 유예 레벨트리거로 변경: 타이머가 밀려도 놓치지 않고, 늦게 로드해도 과거 안내가 몰아치지 않음
-      closing.offsetsMin.forEach(min => {
-        const key = `${now.toDateString()}_${min}`;
-        const inWindow = diffMin > 0 && diffMin <= min && diffMin > min - 2;
-        if (inWindow && !state.closedFlags[key]) {
-          state.closedFlags[key] = true;
-          const repeat = min === 30 ? 1 : 2;
-          playClosingSet(`${closing.baseUrl}${min}m.mp3`, closing.volume, repeat);
-        }
-      });
-
-      const closed = isInClosedWindow(now, closing);
-      const video = document.querySelector('video');
-      if (closed && !state.storeClosed) {
-        if (state.adActive) return;
-        state.storeClosed = true;
-        video?.pause();
-      } else if (!closed && state.storeClosed) {
-        state.storeClosed = false;
-        video?.play().catch(() => {});
-      }
-    }
-
-    function isInClosedWindow(now, closing) {
-      const override = localStorage.getItem('clore_test_closed');
-      if (override === 'closed') return true;
-      if (override === 'open') return false;
-
-      const close = getCloseTime(now, closing);
-      const pauseMin = Math.max(...closing.offsetsMin);
-      const pauseStart = new Date(close.getTime() - pauseMin * 60000);
-      if (now >= pauseStart) return true;
-
-      const [oh, om] = closing.openTime.split(':').map(Number);
-      const todayOpen = new Date(now);
-      todayOpen.setHours(oh, om, 0, 0);
-      return now < todayOpen;
-    }
-
-    function getCloseTime(now, closing) {
-      const summer = isSummerSeason(now);
-      const day = now.getDay();
-      const mode = summer ? closing.hours.summer : closing.hours.winter;
-      const hm = day === 0 ? mode.sun : day === 6 ? mode.sat : mode.monFri;
-      const [h, m] = hm.split(':').map(Number);
-      const t = new Date(now);
-      t.setHours(h, m, 0, 0);
-      return t;
-    }
-
-    function isSummerSeason(now) {
-      const year = now.getFullYear();
-      const mayStart = firstMonday(year, 4);
-      const sepStart = firstMonday(year, 8);
-      return now >= mayStart && now < sepStart;
-    }
-
-    function firstMonday(year, monthIdx) {
-      const d = new Date(year, monthIdx, 1);
-      while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
-      return d;
-    }
-
-    // ━━━ 유틸 ━━━
-    // 기존: steps 고정 → 백그라운드에서 stepMs가 1000ms로 클램프되면 700ms 페이드가 24초로 늘어남
-    // 변경: 경과시간 기준 → 스로틀되면 계단만 거칠어지고 총 길이는 유지
-    function fadeTo(el, target, ms, onDone) {
-      const token = (el.__cloreFade = (el.__cloreFade || 0) + 1);
-      const start = el.volume;
-      const t0 = performance.now();
-      (function tick() {
-        if (el.__cloreFade !== token) return; // 새 페이드가 시작되면 이전 건 즉시 폐기
-        const p = Math.min((performance.now() - t0) / ms, 1);
-        const eased = 0.5 - 0.5 * Math.cos(p * Math.PI);
-        el.volume = Math.min(1, Math.max(0, start + (target - start) * eased));
-        if (p < 1) setTimeout(tick, 25);
-        else onDone?.();
+    globalTarget.playPromo = (n) => {
+      (async () => {
+        await playPromoUnit(n === 2 ? 2 : 1);
+        if (!state.adActive) restoreVideo(CROSS_MS());
       })();
-    }
+    };
+    globalTarget.playClose = (m) => {
+      if (![30, 15, 5, 2].includes(m)) { console.warn('[Clore Core] playClose(30|15|5|2)'); return; }
+      playClose(m);
+    };
 
-    // GainNode 페이드는 오디오 스레드에서 스케줄 → 탭 상태와 무관하게 정확
-    function fadeGainTo(gainNode, target, ms, onDone) {
-      if (!gainNode) { onDone?.(); return; }
-      const ctx = getCtx();
-      const g = gainNode.gain;
-      const t0 = ctx.currentTime;
-      try {
-        g.cancelScheduledValues(t0);
-        g.setValueAtTime(Math.max(g.value, 0.0001), t0);
-        g.linearRampToValueAtTime(Math.max(target, 0.0001), t0 + ms / 1000);
-      } catch (e) {
-        g.value = target;
+    // ━━━ 디버그: 실제 광고/15분 대기 없이 체인·워치독 강제 재현 ━━━
+    globalTarget.simulateAd = (on) => {
+      if (on) {
+        if (state.adActive) { console.warn('[Clore Core] 이미 adActive=true'); return; }
+        state.adActive = true;
+        state.adManaged = !state.storeClosed;
+        console.log('[Clore Core] 🟠 광고 강제 시작 (시뮬레이션)');
+        if (state.adManaged && cfg.muteDuringAd?.enabled
+            && !state.unitPlaying && !state.chainActive && !state.closePlaying) {
+          engageMute();
+          runAdChain(false);
+        }
+      } else {
+        if (!state.adActive) { console.warn('[Clore Core] adActive 이미 false'); return; }
+        state.adActive = false;
+        state.adManaged = false;
+        console.log('[Clore Core] 🟢 광고 강제 종료 (시뮬레이션)');
+        if (state.currentIsFiller && state.fillerAudio) {
+          const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
+          const wake = state.fillerResolve;
+          fadeGainTo(g, 0, CROSS_MS(), () => { a.pause(); try { g.disconnect(); s.disconnect(); } catch (_) {} });
+          restoreVideo(CROSS_MS());
+          if (wake) wake();
+        }
       }
-      if (onDone) setTimeout(onDone, ms + 60);
-    }
+    };
+    globalTarget.forceWatchdog = () => {
+      state.lastAudioAt = Date.now() - (cfg.audio.intervalMin * 60 * 1000) - 1000;
+      console.log('[Clore Core] ⏱ lastAudioAt을 15분+ 전으로 조작 — 다음 TICK(≤1초)에 워치독 발동');
+    };
+    globalTarget.stateNow = () => {
+      console.log('[Clore Core] state:', {
+        workerAlive: state.workerAlive,
+        storeClosed: state.storeClosed,
+        adActive: state.adActive,
+        adManaged: state.adManaged,
+        chainActive: state.chainActive,
+        unitPlaying: state.unitPlaying,
+        closePlaying: state.closePlaying,
+        currentIsFiller: state.currentIsFiller,
+        muteHold: state.muteHold,
+        lastPromoType: state.lastPromoType,
+        minsSinceLastPromo: Math.round((Date.now() - state.lastAudioAt) / 60000),
+        lastDiffMin: state.lastDiffMin === null ? null : Math.round(state.lastDiffMin * 10) / 10,
+        tabVisible: document.visibilityState,
+      });
+    };
 
-    console.log('[Clore Core] 로딩 완료 v3 (전 지점 공통 / 백그라운드탭 대응)');
+    console.log('[Clore Core] v4.0 로딩 완료 (Worker+교차감지+체인/워치독 통합)');
     console.log('[Clore Core] 테스트: testClosed() / testOpen() / testClear()');
-    console.log('[Clore Core] 디버그: playPromo(1|2) / playFillerTest() / stopFillerTest() / stateNow()');
+    console.log('[Clore Core] 오디오: playPromo(1|2) / playClose(30|15|5|2) / stateNow()');
+    console.log('[Clore Core] 체인/워치독 재현: simulateAd(true|false) / forceWatchdog()');
   }
 })();
