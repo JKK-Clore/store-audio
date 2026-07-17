@@ -5,17 +5,19 @@
     "crossfadeMs": 700
   },
   "continueWatchingDialog": {
-    "enabled": true,
-    "pollMs": 1000
+    "enabled": true
   },
   "closing": {
     "baseUrl": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/",
     "offsetsMin": [30, 15, 5, 2],
-    "openTime": "09:30",
     "volume": 2,
+    "open": {
+      "monSat": "09:30",
+      "sun": "11:00"
+    },
     "hours": {
-      "summer": { "monFri": "22:00", "sat": "21:00", "sun": "18:00" },
-      "winter": { "monFri": "21:00", "sat": "20:00", "sun": "18:00" }
+      "summer": { "monFri": "21:00", "sat": "20:00", "sun": "18:00" },
+      "winter": { "monFri": "20:00", "sat": "19:00", "sun": "18:00" }
     }
   },
   "audio": {
@@ -23,7 +25,6 @@
     "intervalMin": 15,
     "volume": 3,
     "activeUntil": "2026-07-26",
-    "text": "📢 Attention: An announcement is currently being broadcast.",
     "tracks": [
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo.m4a",
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo2.m4a"
