@@ -41,6 +41,7 @@
     const blobCache = {};
     const activeTracks = new Set();
     const CLOSE_CATCHUP_MIN = 1.5; // 로드/복귀가 임계점 직후여도 해당 안내만 살림
+    const CLOSE_LOCK_MIN = 30; // 이 시점부터 일반 오디오 차단 + YouTube 정지
     const CROSS_MS = () => cfg.muteDuringAd?.crossfadeMs || 700;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -380,7 +381,9 @@
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // 광고 감지 (MutationObserver — 스로틀 비대상, 감지는 이거 하나로 충분)
+    // 광고 감지 (MutationObserver — 스로틀 비대상)
+    // YouTube의 ytp-ad-player-overlay는 광고가 아닐 때도 DOM에 남을 수 있다.
+    // 실제 플레이어의 ad-showing 클래스만 광고로 인정한다.
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const wiredVideos = new WeakSet();
     function wireMuteGuard(video) { // 이벤트 기반 1차 안전망 (v3 승계)
@@ -393,11 +396,17 @@
       video.addEventListener('playing', forceMute);
     }
 
-    const adObserver = new MutationObserver(() => {
+    function isAdShowing() {
+      return !!document.querySelector('#movie_player.ad-showing, .html5-video-player.ad-showing');
+    }
+    function syncAdState() {
       const video = document.querySelector('video');
-      const adShowing = !!document.querySelector('.ad-showing, .ytp-ad-player-overlay');
       if (!video) return;
       wireMuteGuard(video);
+      // 시간 판정 전의 페이지 초기 DOM 변화는 광고 시작으로 처리하지 않는다.
+      // evaluateTick() 뒤에 한 번 명시적으로 다시 동기화한다.
+      if (state.storeClosed === null) return;
+      const adShowing = isAdShowing();
 
       if (adShowing && !state.adActive) {
         // ── 광고 시작 ──
@@ -429,11 +438,18 @@
         }
         // 프로모/마감 재생 중이면 → 아무것도 안 함 (완주 후 각자 CF2 처리, 이미 합의된 규칙)
       }
+    }
+    const adObserver = new MutationObserver(syncAdState);
+    // YouTube는 광고 전환 때 DOM을 추가하기도 하고, 플레이어의 ad-showing 클래스만 바꾸기도 한다.
+    adObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class'],
     });
-    adObserver.observe(document.body, { childList: true, subtree: true });
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // 영업시간 계산 (확정 표: 여름 21/20/18, 겨울 20/19/18, 오픈 09:30·일 11:00)
+    // 실제 종료 시각 (여름 21:00/20:00/18:00, 겨울 20:00/19:00/18:00)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     function firstMonday(year, monthIdx) {
       const d = new Date(year, monthIdx, 1);
@@ -513,7 +529,9 @@
         const crossed = offsets.filter(min => state.lastDiffMin > min && diff <= min);
         due = crossed.length ? Math.min(...crossed) : null;
       }
-      if (due !== null) fireCloseOnce(due, state.lastDiffMin === null ? 'initial-catchup' : 'crossing');
+      // Array#find는 대상이 없을 때 undefined를 반환한다.
+      // undefined를 방송으로 넘기면 부팅 직후 'undefined분' 멘트가 2회 실행된다.
+      if (Number.isFinite(due)) fireCloseOnce(due, state.lastDiffMin === null ? 'initial-catchup' : 'crossing');
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -529,12 +547,13 @@
       evaluateClosingBroadcasts(diff);
       state.lastDiffMin = diff;
 
-      // 2) storeClosed 판정 (override → 마감30분전 → 오픈전)
+      // 2) storeClosed 판정 (override → 실제 종료 30분 전 → 오픈전)
+      //    일반 오디오·자동재생은 전부 중단하고, 마감방송만 별도 예외로 남긴다.
       const override = localStorage.getItem('clore_test_closed');
       let closed;
       if (override === 'closed') closed = true;
       else if (override === 'open') closed = false;
-      else closed = (diff <= 30) || (now < getOpenTime(now));
+      else closed = (diff <= CLOSE_LOCK_MIN) || (now < getOpenTime(now));
 
       if (closed && state.storeClosed !== true) {
         state.storeClosed = true;
@@ -545,9 +564,12 @@
         const wasClosed = state.storeClosed === true;
         state.storeClosed = false;
         if (wasClosed) {
-          state.lastDiffMin = null; // 리셋 (false→true→false 전환 = 하루 경계)
+          // 날짜/오픈 감시는 계속 살아 있어야 다음 운영을 판정할 수 있다.
+          // 전날 프로모 시각을 이어받으면 재오픈 즉시 워치독이 울리므로 새 15분 주기를 시작한다.
+          state.lastDiffMin = null;
+          state.lastAudioAt = Date.now();
           document.querySelector('video')?.play().catch(() => {});
-          console.log('[Clore Core] storeClosed → false (재개장, 판정상태 리셋)');
+          console.log('[Clore Core] storeClosed → false (재개장, 프로모 워치독 새 주기)');
         } else {
           console.log('[Clore Core] storeClosed → false (초기 동기화)');
         }
@@ -595,6 +617,7 @@
 
     evaluateTick();
     evaluateMuteTick();
+    syncAdState(); // 초기 DOM 상태도 시간 동기화 후 한 번만 판정
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // Web Worker (Dumb Clock — 인라인, 상태·판단·네트워크 없음)
