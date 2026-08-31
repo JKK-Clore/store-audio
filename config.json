@@ -10,7 +10,7 @@
   "closing": {
     "baseUrl": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/",
     "offsetsMin": [30, 15, 5, 2],
-    "volume": 2,
+    "volume": 1,
     "open": {
       "monSat": "09:30",
       "sun": "11:00"
@@ -23,7 +23,7 @@
   "audio": {
     "enabled": true,
     "intervalMin": 15,
-    "volume": 2,
+    "volume": 1,
     "activeUntil": "2026-09-20",
     "tracks": [
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo.m4a",
