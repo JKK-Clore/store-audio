@@ -23,7 +23,7 @@
   "audio": {
     "enabled": true,
     "intervalMin": 15,
-    "volume": 1,
+    "volume": 3,
     "activeUntil": "2026-09-20",
     "tracks": [
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo.m4a",
