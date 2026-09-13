@@ -8,6 +8,7 @@
 <button id="run-mute" type="button">Run mute-recovery scenario</button>
 <button id="run-letgo" type="button">Run let-go scenario</button>
 <button id="run-expiry" type="button">Run promo-expiry scenario</button>
+<button id="run-preempt" type="button">Run preemption scenario</button>
 <pre id="result">Ready</pre>
 <script>
   (() => {
@@ -82,10 +83,19 @@
       createGain() { return new FakeGain(); }
       createMediaElementSource() { return new FakeNode(); }
     }
+    let live = 0, maxLive = 0;
+    window.__resetConcurrency = () => { maxLive = live; }; // live는 유지 — 0으로 밀면 음수로 샌다
+    window.__maxConcurrency = () => maxLive;
     class FakeAudio extends EventTarget {
       constructor() { super(); this.readyState = 4; this.volume = 1; this.muted = false; this.paused = true; this.src = ''; }
-      play() { this.paused = false; record('track-play', this.src); return Promise.resolve(); }
-      pause() { this.paused = true; record('track-pause', this.src); }
+      play() {
+        if (this.paused) { live++; maxLive = Math.max(maxLive, live); }
+        this.paused = false; record('track-play', this.src); return Promise.resolve();
+      }
+      pause() {
+        if (!this.paused) live--;
+        this.paused = true; record('track-pause', this.src);
+      }
     }
     class FakeWorker {
       set onmessage(fn) {
@@ -177,6 +187,45 @@
       result.stages.push(await adStage('2026-07-21T09:30:01', '오픈 직후 광고: 프로모 체인 시작'));
       result.stages.push(await stage('2026-07-21T09:45:00', '광고 프로모 후 14분 59초: 워치독 대기'));
       result.stages.push(await stage('2026-07-21T09:45:01', '광고 프로모 후 15분: 워치독 프로모'));
+      return result;
+    };
+
+    // 회귀④: 시간 창(정숙 구간)이 실패했을 때도 마감방송이 단독으로 나가야 한다.
+    //         서버시각 보정 지연·절전 복귀로 정숙 전환과 마감 임계점이 겹치는 상황의 대역.
+    //         testOpen()으로 시간 판정을 무력화한 뒤, 다른 오디오가 나가는 중에 마감을 쏜다.
+    window.runPreemptScenario = async () => {
+      await delay();
+      const result = { stages: [] };
+      window.testOpen();                 // quiet/storeClosed 무력화 = 시간 창이 안 먹는 상태
+      const pick = (from) => events.slice(from)
+        .filter(e => ['log', 'warn', 'chime', 'track-play'].includes(e.type))
+        .map(e => (e.type === 'log' || e.type === 'warn')
+          ? e.detail.replace('[Clore Core] ', '')
+          : e.type + (e.detail ? ':' + e.detail.split('/').pop() : ''));
+
+      // ① 필러가 나가는 중에 마감방송 발화 → 필러가 잘리고 마감만 남아야 한다
+      window.simulateAd(true);
+      await delay(); await delay();
+      window.__resetConcurrency();
+      let from = events.length;
+      result.필러재생중 = window.__maxConcurrency(); // 마감 쏘기 직전 상태(1이면 필러가 나가는 중)
+      window.playClose(30);
+      await delay(); await delay(); await delay();
+      result.stages.push({ label: '① 필러 재생 중 마감방송 발화', 최대동시재생: window.__maxConcurrency(), 로그: pick(from) });
+      window.simulateAd(false);
+      await delay();
+
+      // ② 마감방송이 나가는 중에 프로모 강제 발화 → 거절돼야 한다 (겹치면 안 됨)
+      window.__resetConcurrency();
+      from = events.length;
+      // 지연 없이 연달아 쏜다. delay()를 끼우면 하네스의 5ms 타이머 때문에 마감방송이
+      // 먼저 끝나버려 겹칠 기회 자체가 안 생긴다(= 아무것도 검증 못 함).
+      window.playClose(15);
+      window.playPromo(1);
+      await delay(); await delay(); await delay(); await delay();
+      result.stages.push({ label: '② 마감방송 중 프로모 강제 발화', 최대동시재생: window.__maxConcurrency(), 로그: pick(from) });
+
+      window.testClear();
       return result;
     };
 
@@ -307,6 +356,7 @@
     document.querySelector('#run-mute').addEventListener('click', run(() => window.runMuteRecoveryScenario()));
     document.querySelector('#run-letgo').addEventListener('click', run(() => window.runLetGoScenario()));
     document.querySelector('#run-expiry').addEventListener('click', run(() => window.runPromoExpiryScenario()));
+    document.querySelector('#run-preempt').addEventListener('click', run(() => window.runPreemptScenario()));
   })();
 </script>
 <script src="./core.js"></script>
