@@ -1,0 +1,312 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Clore closing-flow browser test</title>
+<div id="movie_player" class="html5-video-player"><div class="ytp-ad-player-overlay"></div><video></video></div>
+<button id="run-test" type="button">Run closing scenario</button>
+<button id="run-blocked" type="button">Run blocked-audio scenario</button>
+<button id="run-drift" type="button">Run clock-drift scenario</button>
+<button id="run-mute" type="button">Run mute-recovery scenario</button>
+<button id="run-letgo" type="button">Run let-go scenario</button>
+<button id="run-expiry" type="button">Run promo-expiry scenario</button>
+<pre id="result">Ready</pre>
+<script>
+  (() => {
+    const nativeDate = Date;
+    let clockMs = nativeDate.parse('2026-07-20T19:57:58');
+    class TestDate extends nativeDate {
+      constructor(...args) { super(...(args.length ? args : [clockMs])); }
+      static now() { return clockMs; }
+    }
+    window.Date = TestDate;
+    const events = [];
+    const stamp = () => new nativeDate(clockMs).toISOString().slice(11, 19);
+    const record = (type, detail = '') => events.push({ at: stamp(), type, detail });
+    const stringify = (v) => typeof v === 'string' ? v : JSON.stringify(v);
+    const originalLog = console.log.bind(console);
+    const originalWarn = console.warn.bind(console);
+    console.log = (...args) => { record('log', args.map(stringify).join(' ')); originalLog(...args); };
+    console.warn = (...args) => { record('warn', args.map(stringify).join(' ')); originalWarn(...args); };
+
+    // 매 실행이 깨끗하게 시작하도록 (#keeplog면 이력을 남겨 복원 경로를 검사)
+    if (location.hash !== '#keeplog') {
+      localStorage.removeItem('clore_close_log');
+      localStorage.removeItem('clore_pause_done');
+    }
+
+    // 가상 단조시계 — 워치독/재시도 대기가 performance.now() 기반이므로 하네스도 같이 몰아야 한다.
+    const realPerfNow = performance.now.bind(performance);
+    const perfBase = realPerfNow();
+    let monoMs = 0;
+    performance.now = () => monoMs + (realPerfNow() - perfBase);
+    // 벽시계만 앞뒤로 튀게 하는 용도 (시계 점프 감지 검사)
+    window.__serverSkewMs = 0; // 서버시각 - 로컬 가상시각
+
+    const realSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (fn, ms = 0) => realSetTimeout(fn, Math.min(Number(ms) || 0, 5));
+
+    class FakeNode extends EventTarget {
+      connect() { return this; }
+      disconnect() {}
+    }
+    class FakeGain extends FakeNode {
+      constructor() {
+        super();
+        this.gain = { value: 1, cancelScheduledValues() {}, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} };
+      }
+    }
+    class FakeOscillator extends FakeNode {
+      constructor() { super(); this.frequency = { value: 0 }; this.type = 'sine'; }
+      start() { record('chime'); }
+      stop() { realSetTimeout(() => this.dispatchEvent(new Event('ended')), 1); }
+    }
+    // 매장 PC 실제 조건: 창이 제스처를 못 받으면 ctx는 suspended로 남고
+    // resume()은 reject가 아니라 '무기한 pending'이 된다 (Chrome 자동재생 정책).
+    let audioMode = 'running'; // 'running' | 'blocked'
+    const ctxs = [];
+    window.__setAudioMode = (m) => {
+      audioMode = m;
+      ctxs.forEach(c => { c.state = m === 'blocked' ? 'suspended' : 'running'; });
+      record('audio-mode', m);
+    };
+    class FakeAudioContext {
+      constructor() {
+        this.state = audioMode === 'blocked' ? 'suspended' : 'running';
+        this.currentTime = 0; this.destination = new FakeNode(); ctxs.push(this);
+      }
+      resume() {
+        if (audioMode === 'blocked') return new Promise(() => {}); // 영원히 pending
+        this.state = 'running';
+        return Promise.resolve();
+      }
+      createOscillator() { return new FakeOscillator(); }
+      createGain() { return new FakeGain(); }
+      createMediaElementSource() { return new FakeNode(); }
+    }
+    class FakeAudio extends EventTarget {
+      constructor() { super(); this.readyState = 4; this.volume = 1; this.muted = false; this.paused = true; this.src = ''; }
+      play() { this.paused = false; record('track-play', this.src); return Promise.resolve(); }
+      pause() { this.paused = true; record('track-pause', this.src); }
+    }
+    class FakeWorker {
+      set onmessage(fn) {
+        window.__cloreTick = () => fn({ data: { type: 'TICK' } });
+        window.__cloreMuteTick = () => fn({ data: { type: 'MUTE_TICK' } });
+      }
+    }
+    const badgeShown = () => !!document.querySelector('div[style*="2147483647"]');
+    window.AudioContext = FakeAudioContext;
+    window.webkitAudioContext = FakeAudioContext;
+    window.Audio = FakeAudio;
+    window.Worker = FakeWorker;
+    window.CLORE_BASE = '/test';
+    window.GM_xmlhttpRequest = ({ method, onload }) => {
+      if (method === 'HEAD') {
+        const d = new nativeDate(clockMs + window.__serverSkewMs); // Date 헤더는 초 단위 절삭
+        return onload({ responseHeaders: 'content-type: text/plain\r\ndate: ' + d.toUTCString() + '\r\n' });
+      }
+      onload({ response: new ArrayBuffer(1) });
+    };
+    const config = {
+      muteDuringAd: { enabled: true, fadeMs: 300, crossfadeMs: 700 },
+      continueWatchingDialog: { enabled: true },
+      closing: {
+        baseUrl: '/audio/close/', quietFromMin: 40, pauseAtMin: 15, offsetsMin: [30, 15, 5, 2], volume: 2,
+        open: { monSat: '09:30', sun: '11:00' },
+        hours: {
+          summer: { monFri: '21:00', sat: '20:00', sun: '18:00' },
+          winter: { monFri: '20:00', sat: '19:00', sun: '18:00' }
+        }
+      },
+      audio: { enabled: true, intervalMin: 15, volume: 2, activeUntil: '2026-07-26', tracks: ['/promo1.m4a', '/promo2.m4a'] },
+      filler: { track: '/filler.m4a' }
+    };
+    // 부팅 시점에 이미 만료 / 날짜 형식 오류를 재현하기 위한 해시 스위치
+    if (location.hash === '#expired') config.audio.activeUntil = '2026-06-01';
+    if (location.hash === '#badstamp') config.audio.activeUntil = '어제';
+    window.fetch = async () => new Response(JSON.stringify(config), { status: 200 });
+    const video = document.querySelector('video');
+    let vPaused = true; // <video>.paused는 네이티브 읽기전용 — 대입이 조용히 무시되므로 직접 건다
+    Object.defineProperty(video, 'paused', { get: () => vPaused, set: (v) => { vPaused = !!v; }, configurable: true });
+    video.play = () => { vPaused = false; record('youtube-play'); return Promise.resolve(); };
+    video.pause = () => { vPaused = true; record('youtube-pause'); };
+    // 유튜브 상태 스냅샷 — 뮤트 고착·볼륨 래칫·정지락을 직접 관찰한다
+    const vid = () => ({ paused: video.paused, muted: video.muted, vol: Math.round(video.volume * 1000) / 1000 });
+
+    // 브라우저 테스트용으로만 오디오 대기 시간을 5ms로 축약했으므로,
+    // 각 단계가 완전히 끝난 뒤 다음 가상 시각으로 넘어갈 여유를 둔다.
+    const delay = () => new Promise(resolve => realSetTimeout(resolve, 80));
+    // CF2 페이드를 끝까지 돌린 뒤 볼륨을 읽기 위한 헬퍼 — 가상 단조시계를 2초 밀고 tick을 태운다.
+    const settleFade = async () => { monoMs += 2000; await delay(); monoMs += 2000; await delay(); };
+    const stage = async (at, label) => {
+      const from = events.length;
+      const next = nativeDate.parse(at);
+      monoMs += Math.max(0, next - clockMs); // 단조시계는 벽시계와 함께, 뒤로는 안 간다
+      clockMs = next;
+      window.__cloreTick();
+      window.__cloreMuteTick();
+      await delay();
+      window.__cloreMuteTick();
+      return { label, at: stamp(), events: events.slice(from), video: vid(), badge: badgeShown() };
+    };
+    const adStage = async (at, label) => {
+      const from = events.length;
+      const nextAd = nativeDate.parse(at);
+      monoMs += Math.max(0, nextAd - clockMs);
+      clockMs = nextAd;
+      const player = document.querySelector('#movie_player');
+      player.classList.add('ad-showing');
+      // 프로모 시작을 확인한 뒤 광고 종료 상태도 같은 Observer로 전달한다.
+      realSetTimeout(() => player.classList.remove('ad-showing'), 12);
+      await delay();
+      window.__cloreMuteTick();
+      return { label, at: stamp(), events: events.slice(from), video: vid() };
+    };
+    window.runClosingScenario = async () => {
+      await delay();
+      const initialEvents = [...events];
+      const result = { initialEvents, stages: [] };
+      result.stages.push(await adStage('2026-07-20T19:58:30', '마감 62분 전 광고: 프로모 체인 정상'));
+      result.stages.push(await stage('2026-07-20T20:19:00', '마감 41분 전: 아직 영업'));
+      result.stages.push(await stage('2026-07-20T20:20:00', '마감 40분 전: quiet 진입 (하드컷 없어야 함)'));
+      result.stages.push(await adStage('2026-07-20T20:25:00', 'quiet 중 광고: 뮤트만 — 필러·프로모 없어야 함'));
+      result.stages.push(await stage('2026-07-20T20:30:00', '30분 전: 30분 멘트 / 유튜브 정지 없어야 함'));
+      result.stages.push(await stage('2026-07-20T20:45:00', '15분 전: 멘트 + 자동정지 1회'));
+      result.stages.push(await stage('2026-07-20T20:55:00', '5분 전: 클로징 예외'));
+      result.stages.push(await stage('2026-07-20T20:58:00', '2분 전: 클로징 예외'));
+      result.stages.push(await stage('2026-07-21T09:30:00', '다음날 오픈: quiet 해제 + 워치독 새 주기'));
+      result.stages.push(await adStage('2026-07-21T09:30:01', '오픈 직후 광고: 프로모 체인 시작'));
+      result.stages.push(await stage('2026-07-21T09:45:00', '광고 프로모 후 14분 59초: 워치독 대기'));
+      result.stages.push(await stage('2026-07-21T09:45:01', '광고 프로모 후 15분: 워치독 프로모'));
+      return result;
+    };
+
+    // 회귀③: 프로모 유효기간 만료가 조용히 지나가면 안 된다.
+    window.runPromoExpiryScenario = async () => {
+      await delay();
+      const boot = events.filter(e => /프로모/.test(e.detail || '')).map(e => e.type + ': ' + e.detail);
+      const result = { 부팅로그: boot, stages: [] };
+      const pick = (s) => s.events.filter(e => /프로모|워치독/.test(e.detail || ''))
+                                 .map(e => e.type + ': ' + e.detail.replace('[Clore Core] ', ''));
+      let st;
+      st = await stage('2026-07-26T12:00:00', '만료 당일 정오 — 아직 유효'); result.stages.push({ label: st.label, 로그: pick(st) });
+      st = await stage('2026-07-26T23:59:00', '만료 당일 23:59 — 경계 안쪽');  result.stages.push({ label: st.label, 로그: pick(st) });
+      st = await stage('2026-07-27T00:01:00', '다음날 00:01 — 만료 경고가 떠야 함'); result.stages.push({ label: st.label, 로그: pick(st) });
+      st = await stage('2026-07-27T12:00:00', '만료 후 — 경고는 1회만 (도배 금지)'); result.stages.push({ label: st.label, 로그: pick(st) });
+      window.stateNow();
+      const d = events[events.length - 1].detail || '';
+      const s2 = JSON.parse(d.slice(d.indexOf('{')));
+      result.stateNow = { promoActive: s2.promoActive, activeUntil: s2.activeUntil };
+      return result;
+    };
+
+    // 회귀①: ctx가 잠겨 필러 생성이 실패해도, 광고가 끝나면 뮤트가 반드시 풀려야 한다.
+    //        (v4.1 볼륨 0 고착의 주경로 — currentIsFiller에 복원이 갇혀 있던 문제)
+    window.runMuteRecoveryScenario = async () => {
+      await delay();
+      const result = { stages: [] };
+      window.__setAudioMode('blocked');           // 매장 PC: 창이 클릭을 못 받은 상태
+      result.stages.push(await stage('2026-07-20T14:00:00', '영업 한복판 — 정상'));
+      video.play(); video.muted = false; video.volume = 1; // 직원이 음악을 틀어둔 상태
+      // 광고를 길게 끌어 필러 실패 루프를 관찰한 뒤 종료시킨다
+      const from = events.length;
+      const player = document.querySelector('#movie_player');
+      player.classList.add('ad-showing');
+      await delay(); await delay();
+      const during = { label: '광고 중 (필러 생성 실패)', events: events.slice(from), video: vid() };
+      player.classList.remove('ad-showing');
+      await delay();
+      window.__cloreMuteTick();
+      result.stages.push(during);
+      result.stages.push({ label: '광고 종료 직후 (페이드 중)', events: [], video: vid() });
+      await settleFade();
+      result.stages.push({ label: '페이드 완료 — 뮤트 해제 + 볼륨 원복', events: [], video: vid() });
+      // 볼륨 래칫 검사: 광고를 연달아 태워도 복원 볼륨이 계단식으로 내려가면 안 된다.
+      // 일부러 페이드가 끝나기 전에 다음 광고를 밀어넣어 '중간값 캡처'를 유도한다.
+      for (let i = 1; i <= 5; i++) {
+        player.classList.add('ad-showing');
+        await delay();
+        player.classList.remove('ad-showing');
+        await delay();                 // ← 페이드 진행 중에 다음 루프가 다시 뮤트를 건다
+        window.__cloreMuteTick();
+        result.stages.push({ label: `광고 ${i}회 반복 (페이드 중 재뮤트)`, events: [], video: vid() });
+      }
+      await settleFade();
+      result.stages.push({ label: '반복 후 페이드 완료 — 볼륨이 1.0이어야 함', events: [], video: vid() });
+      window.__setAudioMode('running');
+      return result;
+    };
+
+    // 회귀②: 자동정지 이후 사람이 다시 틀면 스크립트가 다시 끄면 안 된다.
+    window.runLetGoScenario = async () => {
+      await delay();
+      const result = { stages: [] };
+      video.play(); video.volume = 1; // 직원이 음악을 틀어둔 상태로 마감 구간에 진입
+      result.stages.push(await stage('2026-07-20T20:44:00', '16분 전 — 재생 중'));
+      result.stages.push(await stage('2026-07-20T20:45:00', '15분 전 — 자동정지 1회'));
+      video.play(); record('사람이 다시 재생'); // 직원이 음악을 다시 틂
+      result.stages.push(await stage('2026-07-20T20:50:00', '재생 후 — 다시 꺼지면 안 됨'));
+      result.stages.push(await stage('2026-07-20T20:55:00', '5분 전 멘트 — 뮤트 후 복원'));
+      result.stages.push(await stage('2026-07-20T20:58:00', '2분 전 멘트'));
+      result.stages.push(await stage('2026-07-20T21:05:00', '마감 후 — 개입 없어야 함'));
+      result.stages.push(await stage('2026-07-20T23:00:00', '심야 — 개입 없어야 함'));
+      await settleFade();
+      result.finalVideo = vid();
+      result.youtubePauseCount = events.filter(e => e.type === 'youtube-pause').length;
+      result.pauseEvents = events.filter(e => e.detail?.includes('자동 정지')).map(e => e.at + ' ' + e.detail);
+      return result;
+    };
+
+    // 매장 PC 실조건 재현: 유튜브 창이 한 번도 클릭을 못 받아 ctx가 잠긴 상태로 마감을 맞는다.
+    window.runBlockedScenario = async () => {
+      await delay();
+      const result = { stages: [] };
+      window.__setAudioMode('blocked');
+  result.stages.push(await stage('2026-07-20T20:29:00', '잠긴 채 31분 전'));
+      result.stages.push(await stage('2026-07-20T20:30:00', '잠긴 상태로 30분 전 진입 — 무음 감지 + 재시도 예약'));
+      result.stages.push(await stage('2026-07-20T20:30:30', '재시도 대기 중 (20초 미만)'));
+      result.stages.push(await stage('2026-07-20T20:31:00', '재시도 시각 도달 — 여전히 잠김'));
+      const from = events.length;
+      window.__setAudioMode('running');
+      document.dispatchEvent(new Event('pointerdown'));   // 직원이 창을 클릭
+      await delay();
+      result.stages.push({ label: '창 클릭 → 언락', at: stamp(), events: events.slice(from), badge: badgeShown() });
+      result.stages.push(await stage('2026-07-20T20:31:30', '언락 후 재시도 — 30분 멘트가 실제로 나가야 함'));
+      result.badgePresent = badgeShown();
+      return result;
+    };
+
+    // 매장 PC 시계가 3분 느린 실조건: 로컬이 20:27일 때 실제는 20:30 — 그때 30분 안내가 나가야 한다.
+    window.runClockDriftScenario = async () => {
+      await delay();
+      const result = { stages: [] };
+      window.__serverSkewMs = 180000; // 서버가 3분 앞 = 매장 PC 시계가 3분 느림
+      result.stages.push(await stage('2026-07-20T20:26:00', '보정 전 로컬 20:26 (실제 20:29) — 아직 임계 전'));
+      let from = events.length;
+      await window.syncClock();
+      result.stages.push({ label: '서버 시각 동기화', at: stamp(), events: events.slice(from) });
+      result.stages.push(await stage('2026-07-20T20:27:00', '로컬 20:27 = 실제 20:30 — 여기서 30분 안내가 나가야 함'));
+      from = events.length;
+      window.stateNow();
+      const d = events[events.length - 1].detail || '';
+      const st = JSON.parse(d.slice(d.indexOf('{')));
+      result.clock = { offsetSec: st.clockOffsetSec, syncOk: st.clockSyncOk, realNow: st.realNow, localNow: st.localNow };
+      result.closeLog = JSON.parse(localStorage.getItem('clore_close_log') || 'null');
+      return result;
+    };
+
+    const run = (fn) => async () => {
+      const target = document.querySelector('#result');
+      target.textContent = 'Running…';
+      const result = await fn();
+      window.__closingTestResult = result;
+      target.textContent = JSON.stringify(result, null, 2);
+    };
+    document.querySelector('#run-test').addEventListener('click', run(() => window.runClosingScenario()));
+    document.querySelector('#run-blocked').addEventListener('click', run(() => window.runBlockedScenario()));
+    document.querySelector('#run-drift').addEventListener('click', run(() => window.runClockDriftScenario()));
+    document.querySelector('#run-mute').addEventListener('click', run(() => window.runMuteRecoveryScenario()));
+    document.querySelector('#run-letgo').addEventListener('click', run(() => window.runLetGoScenario()));
+    document.querySelector('#run-expiry').addEventListener('click', run(() => window.runPromoExpiryScenario()));
+  })();
+</script>
+<script src="./core.js"></script>
