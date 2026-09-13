@@ -9,6 +9,8 @@
   },
   "closing": {
     "baseUrl": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/",
+    "quietFromMin": 40,
+    "pauseAtMin": 15,
     "offsetsMin": [30, 15, 5, 2],
     "volume": 1,
     "open": {
