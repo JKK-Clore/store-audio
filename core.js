@@ -145,19 +145,15 @@
       closeRetryAt: {},         // 재생 실패한 offset → 재시도 예정 시각 (무음 방송 구제)
       quiet: null,              // 마감 QUIET_FROM_MIN분 전부터 true — 우리 오디오 전면 정숙
       pauseDone: false,         // 그날 자동 정지(1회)를 이미 썼는지
-      stopToken: 0,             // 마감 진입 시 진행 중인 광고/프로모 체인 취소
-      adActive: false,
-      adManaged: false,         // 광고 시작 시점 storeClosed 스냅샷 (State Lock-in)
+      adActive: false,          // 광고 진행 중 (DOM 관찰 결과)
+      adManaged: false,         // 광고를 우리가 다룬다 = 최소한 뮤트는 건다
 
-      chainActive: false,       // 광고체인 진행 중
-      unitPlaying: false,       // 프로모 유닛(워치독 포함) 재생 중
-      closePlaying: false,      // 마감방송 재생 중
+      chainActive: false,       // 광고체인 루프 진행 중 (재진입 방지 전용)
 
-      currentIsFiller: false,
-      fillerAudio: null, fillerGain: null, fillerSource: null,
-      fillerResolve: null,      // 필러 중단 시 while 루프 깨우기
+      // v4의 stopToken / unitPlaying / closePlaying / currentIsFiller 는 사라졌다.
+      // "지금 누가 소리를 내고 있나"는 아래 오디오 채널의 owner 하나가 답한다.
 
-      muteHold: false,          // 시스템이 뮤트를 유지해야 하는 구간
+      muteHold: false,          // 실제로 뮤트를 걸어둔 상태 (syncMute가 유일한 설정자)
       prevVolume: 1,            // CF2 복원 목표값
 
       promoActive: null,        // isPromoActive() 마지막 값 — 만료를 조용히 넘기지 않으려고 추적
@@ -281,6 +277,74 @@
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 오디오 채널 — 단일 채널 + 우선순위 선점
+    //
+    // 우리가 스피커로 내보내는 소리는 언제나 하나여야 한다. 그런데 물리적으로는 각 트랙이
+    // 자기 <audio>를 만들어 같은 ctx.destination으로 들어가므로 얼마든지 겹쳐 나간다 —
+    // '하나만'은 정책이지 제약이 아니었다. v4까지는 그 정책을 unitPlaying/chainActive/
+    // closePlaying/currentIsFiller 네 불리언의 조합으로 지켰고, 조합이 어긋나면 막히는 게
+    // 아니라 그냥 겹쳐 나갔다. 마감방송이 '씹힌' 정체가 그거다(안 나간 게 아니라 묻힌 것).
+    //
+    // 여기서는 통로를 하나로 못박는다. 소리를 내려면 채널을 잡아야(claim) 하고, 더 급한
+    // 쪽이 오면 뺏는다. 뺏긴 쪽은 held()로 자기 소유권만 확인하면 된다 — v4의 stopToken을
+    // 6곳에 뿌려 비교하던 일이 이 한 번의 비교로 대체된다.
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const PRIORITY = { close: 3, promo: 2, filler: 1 };
+    let owner = null;      // { id, kind, prio, tracks:Set, onEvict }
+    let ownerSeq = 0;
+
+    // 정숙 구간 게이트 — v4에서 6곳에 흩어져 있던 !state.quiet 검사가 여기 하나로 모인다.
+    // 마감방송은 게이트를 통과한다(예외 규정이 코드 한 줄로 표현된다).
+    const mayClaim = (kind) => kind === 'close' || !state.quiet;
+
+    function claim(kind, onEvict) {
+      if (!mayClaim(kind)) return null;
+      const prio = PRIORITY[kind] || 0;
+      if (owner && owner.prio >= prio) return null;  // 같거나 높으면 못 뺏는다
+      if (owner) {
+        console.log(`[Clore Core] 채널 선점: ${owner.kind} → ${kind}`);
+        evictOwner();
+      }
+      owner = { id: ++ownerSeq, kind, prio, tracks: new Set(), onEvict };
+      syncMute();
+      return owner.id;
+    }
+    const held = (id) => !!owner && owner.id === id;
+
+    function evictOwner() {
+      const o = owner;
+      owner = null;
+      if (!o) return;
+      // 소유자에게 먼저 기회를 준다 — 필러는 하드컷이 아니라 크로스페이드로 빠진다.
+      try { o.onEvict?.(o); } catch (e) { console.warn('[Clore Core] onEvict 실패', e); }
+      for (const t of [...o.tracks]) { try { t.stop(); } catch (_) {} }
+    }
+    function release(id) {
+      if (!held(id)) return;   // 이미 뺏겼다 — 남의 채널을 건드리지 않는다
+      evictOwner();
+      syncMute();
+    }
+    function evict(kind, reason) {
+      if (owner?.kind !== kind) return;
+      console.log(`[Clore Core] 채널 회수: ${kind} (${reason})`);
+      evictOwner();
+      syncMute();
+    }
+
+    // ━━━ 뮤트는 '푸는' 게 아니라 상태에서 유도한다 ━━━
+    // v4의 사고는 전부 "뮤트를 누가 푸느냐"였다. restoreVideo() 호출이 8곳이었고 각각
+    // 가드 조합이 달랐다 — 한 경로라도 죽으면(v4.0: createTrack이 영영 안 풀림,
+    // v4.1: currentIsFiller가 false로 남음) 뮤트가 영영 안 풀렸다.
+    // 여기서는 푸는 코드가 없다. 원하는 상태를 계산해서 맞출 뿐이고, MUTE_TICK이 250ms마다
+    // 다시 맞추므로 어떤 경로가 죽어도 250ms 안에 스스로 회복한다.
+    const desiredMute = () => !!owner || (state.adActive && state.adManaged);
+    function syncMute() {
+      const want = desiredMute();
+      if (want === state.muteHold) return;
+      if (want) engageMute(); else restoreVideo(CROSS_MS());
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // 침 (볼륨 = 해당 유닛 config값 따라감, 지점배율 없음)
     // 오실레이터 증폭은 클리핑 유발 → 0.4×volume, 상한 1.0
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -310,7 +374,7 @@
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // 트랙 재생 (v3 승계 — gain 확정 → resume → canplaythrough 후 play)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    function createTrack(url, volume, fadeInMs = 0, kind = 'generic') {
+    function createTrack(url, volume, fadeInMs = 0, kind = 'generic', ownerId = null) {
       return new Promise((resolve) => {
         const ctx = getCtx();
         const a = new Audio();
@@ -370,6 +434,12 @@
               },
             };
             activeTracks.add(track);
+            // 트랙을 만드는 사이(수 초가 걸릴 수 있다)에 더 급한 쪽이 채널을 가져갔을 수 있다.
+            // 그 경우 이 트랙은 태어나자마자 버린다 — 소리가 겹치는 걸 여기서 막는다.
+            if (ownerId !== null) {
+              if (!held(ownerId)) { try { track.stop(); } catch (_) {} resolve(null); return; }
+              owner.tracks.add(track);
+            }
             resolve(track);
           })();
         };
@@ -417,30 +487,24 @@
     };
 
     async function playPromoUnit(n) {
-      if (state.quiet) {
-        console.log(`[Clore Core] quiet=true — promo${n} 재생 차단`);
-        return;
-      }
-      const token = state.stopToken;
       const url = cfg.audio?.tracks?.[n - 1];
-      if (!url) { console.warn(`[Clore Core] promo${n} 트랙 없음`); return; }
-      state.unitPlaying = true;
-      state.lastAudioAt = monoNow(); // 재생 시작 시점에도 갱신 (재생 중 워치독 중복트리거 방지)
-      engageMute();
-      await playChime(cfg.audio?.volume);
-      if (state.quiet || token !== state.stopToken) {
-        state.unitPlaying = false;
-        return;
+      if (!url) { console.warn(`[Clore Core] promo${n} 트랙 없음`); return false; }
+      const h = claim('promo');   // 정숙 구간이면 게이트에서 거절된다
+      if (h === null) { console.log(`[Clore Core] 채널 거절 — promo${n}`); return false; }
+      try {
+        state.lastAudioAt = monoNow(); // 시작 시점에도 갱신 (재생 중 워치독 중복트리거 방지)
+        await playChime(cfg.audio?.volume);
+        if (!held(h)) return false;
+        const t = await createTrack(url, cfg.audio?.volume, 0, 'promo', h);
+        if (!t) return false;
+        await waitTrackEnded(t.audio, 60000);
+        if (!held(h)) return false;
+        state.lastPromoType = n;
+        state.lastAudioAt = monoNow(); // 종료 시점 갱신 → 여기서부터 15분 카운트
+        return true;
+      } finally {
+        release(h); // 이미 뺏겼으면 no-op
       }
-      const t = await createTrack(url, cfg.audio?.volume, 0, 'promo');
-      if (t) await waitTrackEnded(t.audio, 60000);
-      if (state.quiet || token !== state.stopToken) {
-        state.unitPlaying = false;
-        return;
-      }
-      state.lastPromoType = n;
-      state.lastAudioAt = monoNow(); // 종료 시점 갱신 → 여기서부터 15분 카운트
-      state.unitPlaying = false;
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -450,66 +514,74 @@
     async function playClose(min) {
       const url = `${cfg.closing.baseUrl}${min}m.mp3`;
       const repeat = min === 30 ? 1 : 2;
-      // 마감방송은 무조건 단독으로 나간다. 정숙 구간(QUIET_FROM_MIN)이 이미 판을 비워두지만
-      // 그건 시간 창일 뿐 보장이 아니다 — 서버시각 보정이 늦게 도착하거나 절전에서 깨어나면
-      // 정숙 전환과 마감 임계점이 같은 tick에 몰릴 수 있다. 여기서 직접 치우고 시작한다.
-      stopNonCloseAudio(`close-${min}`);
-      state.closePlaying = true;
-      engageMute();
-      let heard = 0; // 실제로 스피커까지 나간 횟수 — 0이면 '완료'가 아니라 실패다
-      for (let i = 0; i < repeat; i++) {
-        await playChime(cfg.closing?.volume);
-        const t = await createTrack(url, cfg.closing?.volume, 0, 'close');
-        if (t) { heard++; await waitTrackEnded(t.audio, 60000); }
-        if (i < repeat - 1) await new Promise(r => setTimeout(r, 1000));
+      // 우선순위 3 — 무엇이 나가고 있든 뺏는다. v4의 stopNonCloseAudio()가 하던 '판 비우기'가
+      // claim 한 줄로 대체된다. '비우고 시작한다'가 아니라 '채널은 원래 하나'이기 때문이다.
+      const h = claim('close');
+      if (h === null) { console.warn(`[Clore Core] ⚠ 마감 ${min}분 채널 확보 실패`); return false; }
+      try {
+        let heard = 0; // 실제로 스피커까지 나간 횟수 — 0이면 '완료'가 아니라 실패다
+        for (let i = 0; i < repeat; i++) {
+          await playChime(cfg.closing?.volume);
+          if (!held(h)) break;
+          const t = await createTrack(url, cfg.closing?.volume, 0, 'close', h);
+          if (t) { heard++; await waitTrackEnded(t.audio, 60000); }
+          if (!held(h)) break;
+          if (i < repeat - 1) await new Promise(r => setTimeout(r, 1000));
+        }
+        if (!heard) { console.warn(`[Clore Core] ⚠ 마감 ${min}분 방송 무음 (0/${repeat}회)`); return false; }
+        console.log(`[Clore Core] 마감 ${min}분 방송 완료 (${heard}/${repeat}회)`);
+        return true;
+      } finally {
+        // 채널을 놓으면 뮤트는 syncMute가 알아서 판단한다 — 광고가 아직 돌고 있으면
+        // 유지되고, 아니면 700ms 크로스페이드로 음악이 돌아온다. 조건 분기가 없다.
+        release(h);
       }
-      state.closePlaying = false;
-      // 뮤트 해제 + 볼륨 원복. 유튜브가 정지 상태여도 안전하고(소리 안 남),
-      // 직원이 틀어놨다면 700ms 크로스페이드로 음악이 돌아온다.
-      // 방송 사이에 광고가 시작됐을 수 있다(stopNonCloseAudio가 adActive를 0으로 내렸으므로
-      // DOM을 직접 본다). 아직 광고 중이면 뮤트를 쥔 채 넘기고 종료 핸들러에 복원을 맡긴다.
-      if (isAdShowing()) {
-        state.adActive = true;
-        state.adManaged = cfg.muteDuringAd?.enabled !== false;
-        console.log('[Clore Core] 마감방송 종료 시점에 광고 진행 중 — 뮤트 유지');
-      } else {
-        restoreVideo(CROSS_MS());
-      }
-      if (!heard) { console.warn(`[Clore Core] ⚠ 마감 ${min}분 방송 무음 (0/${repeat}회)`); return false; }
-      console.log(`[Clore Core] 마감 ${min}분 방송 완료 (${heard}/${repeat}회)`);
-      return true;
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // 필러 1회 재생 — 중단 가능 (광고 끝나면 즉시 크로스페이드)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     function playFillerOnce() {
-      return new Promise(async (resolve) => {
+      return new Promise((resolve) => {
         const url = cfg.filler?.track;
         if (!url) { resolve(false); return; }
-        const t = await createTrack(url, 1, cfg.muteDuringAd?.fadeMs || 300, 'filler'); // 필러 볼륨 고정 1
-        // 실패해도 뮤트는 놓지 않는다 — 매장에 광고 소리가 새는 게 무음보다 나쁘다.
-        // 뮤트 해제는 광고 종료 핸들러(syncAdState)가 책임진다.
-        if (!t) { setTimeout(() => resolve(false), 3000); return; }
-        state.currentIsFiller = true;
-        state.fillerAudio = t.audio;
-        state.fillerGain  = t.gain;
-        state.fillerSource = t.source;
-        let timer;
-        const finish = () => {
-          clearTimeout(timer);
-          state.currentIsFiller = false;
-          state.fillerAudio = null; state.fillerGain = null; state.fillerSource = null;
-          state.fillerResolve = null;
-          resolve(true);
-        };
-        state.fillerResolve = finish; // 중단 경로 (observer/simulateAd가 호출)
-        t.audio.addEventListener('ended', finish, { once: true });
-        timer = setTimeout(() => {
-          console.warn('[Clore Core] ⚠ 필러 타임아웃(300000ms) — 강제 종료 후 다음 단계로', url);
-          try { t.audio.pause(); } catch (_) {}
-          finish();
-        }, 300000); // 5분 상한 — 필러는 배경트랙이라 프로모보다 길게 잡음
+        let done = false, timer = null;
+        const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+        // 채널을 회수당하면(광고 종료·마감방송 선점) 하드컷이 아니라 크로스페이드로 빠진다.
+        // v4의 state.fillerResolve/fillerGain/fillerSource 전역 보관이 이 클로저로 대체된다.
+        const h = claim('filler', (o) => {
+          const t = [...o.tracks][0];
+          if (!t) { finish(false); return; }
+          o.tracks.delete(t); // evictOwner의 일괄 stop()에서 제외 — 페이드로 내보낸다
+          fadeGainTo(t.gain, 0, CROSS_MS(), () => {
+            try { t.audio.pause(); } catch (_) {}
+            t.cleanup();
+          });
+          finish(true);
+        });
+        if (h === null) { resolve(false); return; }
+        (async () => {
+          const t = await createTrack(url, 1, cfg.muteDuringAd?.fadeMs || 300, 'filler', h); // 볼륨 고정 1
+          // 실패하면 채널은 놓는다. 매장에 광고 소리가 새지 않는 건 desiredMute()가 보장한다 —
+          // 광고가 살아있는 한 뮤트가 유지되므로, 더는 '누가 풀어주나'를 따질 필요가 없다.
+          if (!t) { release(h); setTimeout(() => finish(false), 3000); return; }
+          // 스스로 끝나는 경우(자연종료·타임아웃)는 크로스페이드 대상이 아니다.
+          // onEvict에 맡기면 페이드가 끝날 때까지 이 트랙이 살아 있는 채로 다음 필러가
+          // 시작돼 둘이 겹친다. 자기 트랙은 자기가 즉시 정리하고 채널을 놓는다.
+          // 크로스페이드는 '밖에서 회수당할 때'(광고 종료·마감 선점)에만 의미가 있다.
+          const endSelf = () => {
+            if (owner?.id === h) owner.tracks.delete(t);
+            try { t.audio.pause(); } catch (_) {}
+            t.cleanup();
+            release(h);
+            finish(true);
+          };
+          t.audio.addEventListener('ended', endSelf, { once: true });
+          timer = setTimeout(() => {
+            console.warn('[Clore Core] ⚠ 필러 타임아웃(300000ms) — 강제 종료 후 다음 단계로', url);
+            endSelf();
+          }, 300000); // 5분 상한 — 필러는 배경트랙이라 프로모보다 길게 잡음
+        })();
       });
     }
 
@@ -517,42 +589,27 @@
     // 광고체인: 프로모1 → 필러 → 프로모2 → 필러 무한 (광고 끝날 때까지)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     async function runAdChain(startAtFiller = false) {
-      if (state.chainActive || state.quiet) return;
-      const token = state.stopToken;
+      if (state.chainActive) return;   // 재진입만 막는다. 정숙 판정은 claim이 한다.
       state.chainActive = true;
-
-      if (!startAtFiller && isPromoActive() && !state.quiet) {
-        await playPromoUnit(1); // 잠김 — 광고가 먼저 끝나도 완주
-        if (state.quiet || token !== state.stopToken) { finishChain(); return; }
-        if (!state.adActive) { restoreVideo(CROSS_MS()); finishChain(); return; }
-      }
-
-      let promo2Done = false;
-      let fillerFails = 0;
-      while (state.adActive && !state.quiet && token === state.stopToken) {
-        const ok = await playFillerOnce(); // 자연종료 or 중단(observer가 크로스페이드+resolve)
-        // 필러가 연속으로 안 뜨면(AudioContext 잠김·네트워크) 3초마다 헛도는 루프가 된다.
-        // 이 광고는 포기하고 뮤트만 유지한 채 빠진다 — 복원은 광고 종료 핸들러가 한다.
-        if (!ok && ++fillerFails >= 2) {
-          console.warn('[Clore Core] ⚠ 필러 연속 실패 — 이 광고는 뮤트만 유지');
-          break;
+      try {
+        if (!startAtFiller && isPromoActive()) await playPromoUnit(1);
+        let promo2Done = false;
+        let fillerFails = 0;
+        while (state.adActive && !state.quiet) {
+          const ok = await playFillerOnce(); // 자연종료 or 채널 회수(크로스페이드)
+          // 필러가 연속으로 안 뜨면(AudioContext 잠김·네트워크) 3초마다 헛도는 루프가 된다.
+          // 이 광고는 포기하고 빠진다 — 뮤트는 광고가 끝날 때까지 desiredMute()가 유지한다.
+          if (!ok && ++fillerFails >= 2) {
+            console.warn('[Clore Core] ⚠ 필러 연속 실패 — 이 광고는 뮤트만 유지');
+            break;
+          }
+          if (!state.adActive || state.quiet) break;
+          if (!promo2Done && isPromoActive()) { promo2Done = true; await playPromoUnit(2); }
         }
-        if (!state.adActive || state.quiet || token !== state.stopToken) break;
-        if (!promo2Done && isPromoActive() && !state.quiet) {
-          await playPromoUnit(2); // 잠김
-          promo2Done = true;
-          if (state.quiet || token !== state.stopToken) break;
-          if (!state.adActive) { restoreVideo(CROSS_MS()); break; }
-        }
+      } finally {
+        state.chainActive = false;
+        syncMute(); // 복원 여부를 조건으로 따지지 않는다 — 상태에서 계산된다
       }
-
-      // 광고가 실제로 끝났을 때만 복원한다. 아직 광고 중이면 뮤트를 쥔 채 빠지고
-      // syncAdState의 종료 분기가 풀어준다 — 여기서 풀면 광고 소리가 매장에 나간다.
-      if (!state.adActive && !state.closePlaying && !state.unitPlaying) restoreVideo(CROSS_MS());
-      finishChain();
-    }
-    function finishChain() {
-      state.chainActive = false;
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -562,12 +619,9 @@
       const n = state.lastPromoType === 1 ? 2 : 1; // 마지막의 반대
       console.log(`[Clore Core] 워치독 발동 → promo${n}`);
       await playPromoUnit(n);
-      if (state.adActive && state.adManaged && !state.quiet) {
-        runAdChain(true); // 재생 도중 광고 시작됨 → 필러부터 체인 인계
-        return;
-      }
-      if (state.adActive) return;          // 광고 중 — 뮤트 유지, 종료 핸들러가 복원
-      if (!state.closePlaying) restoreVideo(CROSS_MS()); // CF2
+      // 재생 도중 광고가 시작됐으면 필러부터 체인 인계. 아니면 끝 — 뮤트는 알아서 맞춰진다.
+      if (state.adActive && state.adManaged && !state.quiet) runAdChain(true);
+      else syncMute();
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -602,37 +656,17 @@
         // ── 광고 시작 ──
         state.adActive = true;
         // 시간대와 무관하게 광고는 '관리 대상'이다 — 최소한 뮤트는 건다.
-        // 예전엔 storeClosed 중 시작한 광고를 방치해서, 마감 구간에 누가 유튜브를 틀면
-        // 광고 소리가 그대로 매장에 나갔다.
         state.adManaged = cfg.muteDuringAd?.enabled !== false;
-        if (state.adManaged) {
-          if (state.unitPlaying || state.chainActive || state.closePlaying) {
-            // 다른 유닛 재생 중 — muteHold 이미 걸려있음, 종료 시 각자 인계 처리
-          } else {
-            engageMute(); // 광고소리 즉시 컷 (침 시작 전 선제 뮤트)
-            // 정숙 구간에선 뮤트만 건다. 필러를 깔면 마감방송과 겹칠 수 있다.
-            if (!state.quiet) runAdChain(false);
-          }
-        }
+        syncMute();                       // 광고 소리 즉시 컷
+        // 정숙 구간에선 뮤트만 건다(필러를 깔면 마감방송과 겹칠 수 있다).
+        // 마감방송·프로모가 채널을 쥐고 있으면 claim이 알아서 거절하므로 여기서 안 따진다.
+        if (state.adManaged && !state.quiet) runAdChain(false);
       } else if (!adShowing && state.adActive) {
         // ── 광고 종료 ──
         state.adActive = false;
         state.adManaged = false;
-        if (state.currentIsFiller && state.fillerAudio) {
-          // 필러 중단 — CF1 (진짜 크로스페이드)
-          const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
-          const wake = state.fillerResolve;
-          fadeGainTo(g, 0, CROSS_MS(), () => {
-            a.pause();
-            try { g.disconnect(); s.disconnect(); } catch (_) {}
-          });
-          if (wake) wake(); // while 루프 깨워서 정상 종료
-        }
-        // CF2는 필러가 있었든 없었든 무조건 돌린다.
-        // 예전엔 이 복원이 위 if 안에 갇혀 있어서, 필러 생성이 실패하면(AudioContext 잠김 등)
-        // currentIsFiller가 false로 남아 광고가 끝나도 뮤트가 안 풀렸다 — 볼륨 0 고착의 주경로.
-        // 마감방송·프로모가 진행 중일 때만 양보한다(그쪽이 끝나며 각자 복원한다).
-        if (!state.closePlaying && !state.unitPlaying) restoreVideo(CROSS_MS());
+        evict('filler', '광고 종료');      // 필러가 돌고 있으면 크로스페이드로 내린다
+        syncMute();                       // 복원이 '계산'된다 — 조건 조합이 필요 없다
       }
     }
     const adObserver = new MutationObserver(syncAdState);
@@ -711,18 +745,14 @@
         console.log(`[Clore Core] ⏹ 자동 정지 시점 (${reason}) — 이미 정지 상태`);
       }
     }
-    function stopNonCloseAudio(reason) {
-      state.stopToken += 1;
-      for (const t of [...activeTracks]) {
-        if (t.kind !== 'close') t.stop();
-      }
-      if (state.fillerResolve) state.fillerResolve();
-      state.adActive = false;
-      state.adManaged = false;
-      state.chainActive = false;
-      state.unitPlaying = false;
-      state.currentIsFiller = false;
-      console.log(`[Clore Core] 비마감 오디오 중단 (${reason})`);
+    // 채널을 강제로 비운다. v4의 stopNonCloseAudio와 달리 adActive/adManaged는 건드리지
+    // 않는다 — 광고가 실제로 돌고 있는데 플래그만 내리면 syncMute가 뮤트를 풀어버려
+    // 매장에 광고 소리가 나간다. 광고 상태는 DOM 관찰자만 바꾼다.
+    function stopAudio(reason) {
+      if (!owner) return;
+      console.log(`[Clore Core] 오디오 중단 (${reason}) — ${owner.kind}`);
+      evictOwner();
+      syncMute();
     }
     function fireCloseOnce(min, reason) {
       if (state.playedCloseOffsets.has(min)) return;
@@ -809,7 +839,7 @@
 
       if (closed && state.storeClosed !== true) {
         state.storeClosed = true;
-        stopNonCloseAudio('storeClosed=true');
+        stopAudio('storeClosed=true');
         console.log('[Clore Core] storeClosed → true (우리 오디오만 정지 — YouTube 재생은 그대로)');
       } else if (!closed && state.storeClosed !== false) {
         const wasClosed = state.storeClosed === true;
@@ -863,8 +893,7 @@
 
       // 4) 워치독 — 15분 프로모 공백 감시 (기존 TICK에 조건 하나, 별도 폴링 없음)
       if (cfg.audio?.enabled && promoActive
-          && !state.quiet && !state.adActive
-          && !state.chainActive && !state.unitPlaying && !state.closePlaying
+          && !state.quiet && !state.adActive && !state.chainActive && !owner
           && monoNow() - state.lastAudioAt >= cfg.audio.intervalMin * 60 * 1000) {
         watchdogFire();
       }
@@ -887,6 +916,9 @@
     // MUTE_TICK 판정 (Worker 250ms tick마다) — 백업 폴링 + 스킵버튼
     function evaluateMuteTick() {
       renderUnlockBadge(); // ctx가 죽었다 살아났다 하는 경우까지 추적
+      // ★ 자가 복구 지점: 뮤트를 상태 기준으로 250ms마다 다시 맞춘다.
+      //   어떤 경로가 중간에 죽어도(v4.0의 무한 pending 같은) 여기서 회복된다.
+      syncMute();
       const video = document.querySelector('video');
       // 정지 락은 폐기됐다 — YouTube 재생/정지는 사람 몫이고,
       // 스크립트의 개입은 stopPlaybackOnce() 하루 1회뿐이다.
@@ -989,9 +1021,9 @@
       const video = document.querySelector('video');
       if (!video) return;
       wireMuteGuard(video);
-      if (!state.muteHold && !state.adActive && video.muted) {
-        video.muted = false;
-      }
+      syncMute();
+      // 우리가 뮤트를 쥐고 있지도 않은데 음소거로 남아 있으면(이전 세션 잔재 등) 풀어준다.
+      if (!state.muteHold && !desiredMute() && video.muted) video.muted = false;
     });
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1024,7 +1056,7 @@
     globalTarget.playPromo = (n) => {
       (async () => {
         await playPromoUnit(n === 2 ? 2 : 1);
-        if (!state.adActive && !state.closePlaying) restoreVideo(CROSS_MS());
+        syncMute();
       })();
     };
     globalTarget.playClose = (m) => {
@@ -1039,22 +1071,15 @@
         state.adActive = true;
         state.adManaged = cfg.muteDuringAd?.enabled !== false;
         console.log('[Clore Core] 🟠 광고 강제 시작 (시뮬레이션)');
-        if (state.adManaged && !state.unitPlaying && !state.chainActive && !state.closePlaying) {
-          engageMute();
-          if (!state.quiet) runAdChain(false);
-        }
+        syncMute();
+        if (state.adManaged && !state.quiet) runAdChain(false);
       } else {
         if (!state.adActive) { console.warn('[Clore Core] adActive 이미 false'); return; }
         state.adActive = false;
         state.adManaged = false;
         console.log('[Clore Core] 🟢 광고 강제 종료 (시뮬레이션)');
-        if (state.currentIsFiller && state.fillerAudio) {
-          const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
-          const wake = state.fillerResolve;
-          fadeGainTo(g, 0, CROSS_MS(), () => { a.pause(); try { g.disconnect(); s.disconnect(); } catch (_) {} });
-          if (wake) wake();
-        }
-        if (!state.closePlaying && !state.unitPlaying) restoreVideo(CROSS_MS());
+        evict('filler', '광고 강제 종료');
+        syncMute();
       }
     };
     globalTarget.syncClock = () => syncClock('수동').then(() => globalTarget.stateNow());
@@ -1087,10 +1112,10 @@
         adActive: state.adActive,
         adManaged: state.adManaged,
         chainActive: state.chainActive,
-        unitPlaying: state.unitPlaying,
-        closePlaying: state.closePlaying,
-        currentIsFiller: state.currentIsFiller,
+        channel: owner ? `${owner.kind}#${owner.id}` : null, // 지금 소리를 쥐고 있는 쪽
+        channelTracks: owner ? owner.tracks.size : 0,
         muteHold: state.muteHold,
+        muteWanted: desiredMute(), // muteHold와 다르면 다음 MUTE_TICK에 맞춰진다
         promoActive: state.promoActive,
         activeUntil: cfg.audio?.activeUntil ?? null,
         lastPromoType: state.lastPromoType,
@@ -1100,7 +1125,7 @@
       });
     };
 
-    console.log(`[Clore Core] v4.2 로딩 완료 — 정숙구간 ${QUIET_FROM_MIN}분 / 자동정지 ${PAUSE_AT_MIN}분 전 1회 / YouTube 정지락 폐기`);
+    console.log(`[Clore Core] v5.0 로딩 완료 — 단일 오디오 채널+우선순위 / 뮤트 자동조정 / 정숙구간 ${QUIET_FROM_MIN}분 / 자동정지 ${PAUSE_AT_MIN}분 전 1회`);
     console.log('[Clore Core] 테스트: testClosed() / testOpen() / testClear()');
     console.log('[Clore Core] 오디오: playPromo(1|2) / playClose(30|15|5|2) / stateNow()');
     console.log('[Clore Core] 체인/워치독 재현: simulateAd(true|false) / forceWatchdog()');
