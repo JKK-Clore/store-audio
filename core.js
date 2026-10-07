@@ -410,7 +410,14 @@
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // Promo Unit (원자성: 침 + 트랙 + mute 한 몸) — unmute는 밖에서
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // activeFrom(시작일, 그날 00:00 부터) ~ activeUntil(종료일, 그날 23:59:59 까지) — 둘 다 선택 사항, YYYY-MM-DD.
+    // 둘 다 같은 방식(nowReal() 과 PC 로컬 시각 문자열 비교)이라 «매장 현지 날짜» 로 읽힌다.
+    // 형식이 틀리면(Invalid Date) 비교가 false 라 꺼진 쪽으로 닫힌다 — activeUntil 과 같은 방향.
+    // audio.enabled === false 면 광고 체인(promo1/2)도 끈다 — 전엔 워치독만 이 값을 봐서 «Off» 로 해도 광고마다 프로모가 나갔다.
     const isPromoActive = () => {
+      if (cfg.audio?.enabled === false) return false;
+      const from = cfg.audio?.activeFrom;
+      if (from && !(nowReal() >= new Date(`${from}T00:00:00`))) return false;
       const until = cfg.audio?.activeUntil;
       if (!until) return true;
       return nowReal() <= new Date(`${until}T23:59:59`);
@@ -846,10 +853,18 @@
       const promoActive = isPromoActive();
       if (promoActive !== state.promoActive) {
         const first = state.promoActive === null;
+        const from = cfg.audio?.activeFrom;
         const until = cfg.audio?.activeUntil;
         state.promoActive = promoActive;
         if (promoActive) {
-          console.log(`[Clore Core] 프로모 활성 ${until ? `(activeUntil ${until})` : '(기한 없음)'}`);
+          console.log(`[Clore Core] 프로모 활성 ${from ? `(activeFrom ${from}) ` : ''}${until ? `(activeUntil ${until})` : '(기한 없음)'}`);
+        } else if (cfg.audio?.enabled === false) {
+          console.warn('[Clore Core] 프로모 꺼짐 — audio.enabled=false. promo1/2와 워치독이 나가지 않습니다. 필러·마감방송은 영향 없습니다.');
+        } else if (from && !(nowReal() >= new Date(`${from}T00:00:00`))) {
+          // 아직 시작 전(또는 시작일 형식 오류) — 만료와 다른 상태이므로 경고색 대신 일반 경고로 구분한다.
+          const badFrom = Number.isNaN(new Date(`${from}T00:00:00`).getTime());
+          console.warn(`[Clore Core] 프로모 대기 — activeFrom ${badFrom ? `"${from}" 형식 오류` : `${from} 이전`}`
+            + ` (${first ? '부팅 시점' : '방금'}). 시작일부터 promo1/2와 워치독이 나갑니다. 필러·마감방송은 영향 없습니다.`);
         } else {
           const malformed = !!until && Number.isNaN(new Date(`${until}T23:59:59`).getTime());
           console.warn(
@@ -1092,6 +1107,7 @@
         currentIsFiller: state.currentIsFiller,
         muteHold: state.muteHold,
         promoActive: state.promoActive,
+        activeFrom: cfg.audio?.activeFrom ?? null,
         activeUntil: cfg.audio?.activeUntil ?? null,
         lastPromoType: state.lastPromoType,
         minsSinceLastPromo: Math.round((monoNow() - state.lastAudioAt) / 60000),
