@@ -3,12 +3,12 @@
 
   const BASE  = window.CLORE_BASE;
   const GMXHR = window.GM_xmlhttpRequest;
-  if (!BASE) { console.error('[Clore Core] BASE 없음 — 로더 확인'); return; }
+  if (!BASE) { return; }
 
   fetch(`${BASE}/config.json?t=${Date.now()}`)
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(init)
-    .catch(e => console.error('[Clore Core] config 로드 실패', e));
+    .catch(e => void 0);
 
   function init(cfg) {
     const monoNow = () => performance.now();
@@ -54,22 +54,19 @@
         }
         if (!best) {
           clockSyncOk = false;
-          console.warn(`[Clore Core] ⚠ 시각 동기화 실패 (${reason}) — 로컬 시계로 계속 판정` +
-            (GMXHR ? '' : ' | GM_xmlhttpRequest 없음: 로더의 @grant 확인 필요'));
           return false;
         }
         const rtt = best.t1 - best.t0;
         const next = best.server + 500 + rtt / 2 - best.t1;
         if (Math.abs(next) > 12 * 3600 * 1000) {
-          console.warn(`[Clore Core] ⚠ 시각 오프셋 비정상(${Math.round(next / 1000)}초) — 무시`);
           return false;
         }
         const shift = next - clockOffsetMs;
         clockOffsetMs = next;
         clockSyncOk = true;
-        const lv = Math.abs(shift) > 5000 ? 'warn' : 'log';
-        console[lv](`[Clore Core] ⏱ 시각 동기화 (${reason}) — 로컬 시계 오차 ` +
-          `${(clockOffsetMs / 1000).toFixed(1)}초, 이번 보정 ${(shift / 1000).toFixed(1)}초, RTT ${rtt}ms`);
+        if (Math.abs(shift) > 5000) {
+        } else {
+        }
         return true;
       } finally {
         clockSyncing = false;
@@ -83,8 +80,7 @@
       const skew = (wall - jumpWall) - (mono - jumpMono);
       jumpWall = wall; jumpMono = mono;
       if (Math.abs(skew) <= 5000) return;
-      console.warn(`[Clore Core] ⚠ 시계 점프 감지 (${Math.round(skew / 1000)}초) — 즉시 재동기화`);
-      syncClock('시계 점프');
+      syncClock('clock-jump');
     }
 
     const CLOSE_LOG_KEY = 'clore_close_log';
@@ -176,7 +172,7 @@
         onload: (res) => {
           blobCache[url] = URL.createObjectURL(new Blob([res.response], { type: 'audio/mpeg' }));
         },
-        onerror: () => console.warn('[Clore Core] 프리로드 실패', url),
+        onerror: () => void 0,
       });
     }
 
@@ -259,7 +255,7 @@
         a.crossOrigin = 'anonymous';
         a.preload = 'auto';
         a.src = blobCache[url] || url;
-        if (!blobCache[url]) console.warn('[Clore Core] blob 미준비 — 원격 재생:', url);
+        if (!blobCache[url]) void 0;
 
         let source, gain;
         try {
@@ -267,7 +263,7 @@
           gain   = ctx.createGain();
           source.connect(gain);
           gain.connect(ctx.destination);
-        } catch (e) { console.warn('[Clore Core] 그래프 생성 실패', url, e); resolve(null); return; }
+        } catch (e) { resolve(null); return; }
 
         const targetGain = safeGain(volume);
         gain.gain.value = fadeInMs > 0 ? 0.0001 : targetGain;
@@ -279,7 +275,6 @@
           if (track) activeTracks.delete(track);
         };
         const fail = (why) => {
-          console.warn('[Clore Core] ⚠ 재생 실패 —', why, url);
           try { a.pause(); } catch (_) {}
           cleanup();
           resolve(null);
@@ -291,9 +286,9 @@
             await withTimeout(Promise.resolve(ctx.resume()).catch(() => {}), 1500, null);
             if (ctx.state !== 'running') return fail('AudioContext ' + ctx.state);
             const played = await withTimeout(
-              a.play().then(() => true, (e) => { console.warn('[Clore Core] play() 거부', e); return false; }),
+              a.play().then(() => true, (e) => { return false; }),
               3000, false);
-            if (!played) return fail('play() 시작 안 됨');
+            if (!played) return fail('play() did not start');
             if (fadeInMs > 0) fadeGainTo(gain, targetGain, fadeInMs);
             track = {
               audio: a, gain, source, cleanup, kind,
@@ -314,7 +309,6 @@
         a.addEventListener('error', () => {
           if (settled) return;
           settled = true;
-          console.warn('[Clore Core] 오디오 에러', url);
           cleanup();
           resolve(null);
         }, { once: true });
@@ -336,7 +330,6 @@
         audio.addEventListener('ended', finish, { once: true });
         audio.addEventListener('clorestop', finish, { once: true });
         const timer = setTimeout(() => {
-          console.warn('[Clore Core] ⚠ 트랙 타임아웃(' + maxMs + 'ms) — 강제 종료 후 다음 단계로', audio.src);
           try { audio.pause(); } catch (_) {}
           finish();
         }, maxMs);
@@ -354,12 +347,11 @@
 
     async function playPromoUnit(n) {
       if (state.quiet) {
-        console.log(`[Clore Core] quiet=true — promo${n} 재생 차단`);
         return;
       }
       const token = state.stopToken;
       const url = cfg.audio?.tracks?.[n - 1];
-      if (!url) { console.warn(`[Clore Core] promo${n} 트랙 없음`); return; }
+      if (!url) { return; }
       state.unitPlaying = true;
       state.lastAudioAt = monoNow();
       engageMute();
@@ -396,12 +388,10 @@
       if (isAdShowing()) {
         state.adActive = true;
         state.adManaged = cfg.muteDuringAd?.enabled !== false;
-        console.log('[Clore Core] 마감방송 종료 시점에 광고 진행 중 — 뮤트 유지');
       } else {
         restoreVideo(CROSS_MS());
       }
-      if (!heard) { console.warn(`[Clore Core] ⚠ 마감 ${min}분 방송 무음 (0/${repeat}회)`); return false; }
-      console.log(`[Clore Core] 마감 ${min}분 방송 완료 (${heard}/${repeat}회)`);
+      if (!heard) { return false; }
       return true;
     }
 
@@ -426,7 +416,6 @@
         state.fillerResolve = finish;
         t.audio.addEventListener('ended', finish, { once: true });
         timer = setTimeout(() => {
-          console.warn('[Clore Core] ⚠ 필러 타임아웃(300000ms) — 강제 종료 후 다음 단계로', url);
           try { t.audio.pause(); } catch (_) {}
           finish();
         }, 300000);
@@ -449,7 +438,6 @@
       while (state.adActive && !state.quiet && token === state.stopToken) {
         const ok = await playFillerOnce();
         if (!ok && ++fillerFails >= 2) {
-          console.warn('[Clore Core] ⚠ 필러 연속 실패 — 이 광고는 뮤트만 유지');
           break;
         }
         if (!state.adActive || state.quiet || token !== state.stopToken) break;
@@ -470,7 +458,6 @@
 
     async function watchdogFire() {
       const n = state.lastPromoType === 1 ? 2 : 1;
-      console.log(`[Clore Core] 워치독 발동 → promo${n}`);
       await playPromoUnit(n);
       if (state.adActive && state.adManaged && !state.quiet) {
         runAdChain(true);
@@ -577,7 +564,6 @@
       state.pauseDone = loadPauseDone(key);
       state.lastDiffMin = null;
       if (state.playedCloseOffsets.size) {
-        console.log('[Clore Core] 마감 이력 복원:', [...state.playedCloseOffsets].join(', ') + '분');
       }
     }
     function stopPlaybackOnce(reason) {
@@ -587,9 +573,7 @@
       const video = document.querySelector('video');
       if (video && !video.paused) {
         try { video.pause(); } catch (_) {}
-        console.log(`[Clore Core] ⏹ 자동 정지 (${reason}) — 이후 재생은 사람 몫`);
       } else {
-        console.log(`[Clore Core] ⏹ 자동 정지 시점 (${reason}) — 이미 정지 상태`);
       }
     }
     function stopNonCloseAudio(reason) {
@@ -603,17 +587,14 @@
       state.chainActive = false;
       state.unitPlaying = false;
       state.currentIsFiller = false;
-      console.log(`[Clore Core] 비마감 오디오 중단 (${reason})`);
     }
     function fireCloseOnce(min, reason) {
       if (state.playedCloseOffsets.has(min)) return;
       markClose(min);
-      console.log(`[Clore Core] 마감 ${min}분 방송 트리거 (${reason})`);
       Promise.resolve(playClose(min)).then((ok) => {
         if (ok) { delete state.closeRetryAt[min]; return; }
         unmarkClose(min);
         state.closeRetryAt[min] = monoNow() + 20000;
-        console.warn(`[Clore Core] ⚠ 마감 ${min}분 방송 실패 — 20초 뒤 재시도`);
       });
     }
     function evaluateClosingBroadcasts(diff) {
@@ -638,7 +619,6 @@
         due = crossed.length ? Math.min(...crossed) : null;
         crossed.filter(m => m !== due).forEach(m => {
           markClose(m);
-          console.warn(`[Clore Core] ⚠ ${m}분 안내 건너뜀 — tick 공백 ${state.lastDiffMin.toFixed(1)}→${diff.toFixed(1)}분`);
         });
       }
       if (Number.isFinite(due)) fireCloseOnce(due, state.lastDiffMin === null ? 'initial-catchup' : 'crossing');
@@ -646,7 +626,7 @@
 
     function evaluateTick() {
       detectClockJump();
-      if (monoNow() - clockSyncedMono >= CLOCK_RESYNC_MS) syncClock('주기 재동기화');
+      if (monoNow() - clockSyncedMono >= CLOCK_RESYNC_MS) syncClock('periodic-resync');
       const now = nowReal();
       syncCloseDate(now);
       const diff = minsToClose(now);
@@ -662,33 +642,27 @@
         const first = state.quiet === null;
         state.quiet = quiet;
         if (quiet) {
-          console.log(`[Clore Core] quiet → true (${first ? '초기 동기화' : `마감 ${QUIET_FROM_MIN}분 전 진입`})`
-            + ' — 프로모·워치독·필러 차단 / 광고는 뮤트만');
         } else {
           state.lastAudioAt = monoNow();
-          console.log(`[Clore Core] quiet → false (${first ? '초기 동기화' : '영업 재개'})`);
         }
       }
 
       if (closed && state.storeClosed !== true) {
         state.storeClosed = true;
         stopNonCloseAudio('storeClosed=true');
-        console.log('[Clore Core] storeClosed → true (우리 오디오만 정지 — YouTube 재생은 그대로)');
       } else if (!closed && state.storeClosed !== false) {
         const wasClosed = state.storeClosed === true;
         state.storeClosed = false;
         if (wasClosed) {
           state.lastDiffMin = null;
           state.lastAudioAt = monoNow();
-          console.log('[Clore Core] storeClosed → false (재개장, 프로모 워치독 새 주기)');
         } else {
-          console.log('[Clore Core] storeClosed → false (초기 동기화)');
         }
       }
 
       if (state.lastDiffMin !== null && diff > 0
           && state.lastDiffMin > PAUSE_AT_MIN && diff <= PAUSE_AT_MIN) {
-        stopPlaybackOnce(`마감 ${PAUSE_AT_MIN}분 전`);
+        stopPlaybackOnce(`${PAUSE_AT_MIN} min before close`);
       }
 
       evaluateClosingBroadcasts(diff);
@@ -701,21 +675,11 @@
         const until = cfg.audio?.activeUntil;
         state.promoActive = promoActive;
         if (promoActive) {
-          console.log(`[Clore Core] 프로모 활성 ${from ? `(activeFrom ${from}) ` : ''}${until ? `(activeUntil ${until})` : '(기한 없음)'}`);
         } else if (cfg.audio?.enabled === false) {
-          console.warn('[Clore Core] 프로모 꺼짐 — audio.enabled=false. promo1/2와 워치독이 나가지 않습니다. 필러·마감방송은 영향 없습니다.');
         } else if (from && !(nowReal() >= new Date(`${from}T00:00:00`))) {
           const badFrom = Number.isNaN(new Date(`${from}T00:00:00`).getTime());
-          console.warn(`[Clore Core] 프로모 대기 — activeFrom ${badFrom ? `"${from}" 형식 오류` : `${from} 이전`}`
-            + ` (${first ? '부팅 시점' : '방금'}). 시작일부터 promo1/2와 워치독이 나갑니다. 필러·마감방송은 영향 없습니다.`);
         } else {
           const malformed = !!until && Number.isNaN(new Date(`${until}T23:59:59`).getTime());
-          console.warn(
-            `%c⚠ 프로모 비활성 — activeUntil ${malformed ? `"${until}" 형식 오류` : `${until} 만료`}`,
-            'color:#fff;background:#c0392b;padding:2px 8px;border-radius:4px;font-weight:bold;'
-          );
-          console.warn(`[Clore Core] promo1/2와 워치독이 나가지 않습니다 (${first ? '부팅 시점에 이미 만료' : '방금 만료됨'}).`
-            + ' config.json의 audio.activeUntil을 갱신하세요. 필러·마감방송은 영향 없습니다.');
         }
       }
 
@@ -730,9 +694,9 @@
         const official = document.querySelector('.ytp-confirm-dialog-renderer-button-primary');
         if (official) { official.click(); return; }
         const fallback = [...document.querySelectorAll('button')].find(b =>
-          /^(yes|예)$/i.test((b.textContent || '').trim())
+          /^(yes|\uC608)$/i.test((b.textContent || '').trim())
         );
-        if (fallback && /paused|continue watching|일시정지/i.test(document.body.innerText || '')) {
+        if (fallback && /paused|continue watching|\uC77C\uC2DC\uC815\uC9C0/i.test(document.body.innerText || '')) {
           fallback.click();
         }
       }
@@ -759,7 +723,7 @@
       }
       if (unlockBadge) return;
       unlockBadge = document.createElement('div');
-      unlockBadge.textContent = '🔇 클릭해서 매장 방송 활성화';
+      unlockBadge.textContent = '🔇 Click to enable store audio';
       unlockBadge.style.cssText = [
         'position:fixed', 'z-index:2147483647', 'right:16px', 'bottom:16px',
         'padding:10px 16px', 'border-radius:8px', 'background:#c0392b', 'color:#fff',
@@ -768,7 +732,6 @@
       ].join(';');
       unlockBadge.addEventListener('click', unlockAudio);
       (document.body || document.documentElement).appendChild(unlockBadge);
-      console.warn('[Clore Core] 🔇 AudioContext 잠김 — 이 창을 한 번 클릭해야 소리가 나갑니다');
     }
     function unlockAudio() {
       const ctx = getCtx();
@@ -779,7 +742,7 @@
       document.addEventListener(ev, unlockAudio, { capture: true, passive: true }));
     unlockAudio();
 
-    syncClock('부팅').then(() => evaluateTick());
+    syncClock('boot').then(() => evaluateTick());
 
     evaluateTick();
     evaluateMuteTick();
@@ -805,10 +768,8 @@
           else if (e.data?.type === 'MUTE_TICK') evaluateMuteTick();
         };
         state.workerAlive = true;
-        console.log('[Clore Core] Worker 가동 ✓ (백그라운드 스로틀 면역)');
       } catch (e) {
         state.workerAlive = false;
-        console.warn('[Clore Core] Worker 생성 실패 — 메인스레드 폴백', e);
         setInterval(evaluateTick, 1000);
         setInterval(evaluateMuteTick, 250);
       }
@@ -816,7 +777,7 @@
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      if (monoNow() - clockSyncedMono > 60000) syncClock('탭 복귀').then(() => evaluateTick());
+      if (monoNow() - clockSyncedMono > 60000) syncClock('tab-visible').then(() => evaluateTick());
       evaluateTick();
       const video = document.querySelector('video');
       if (!video) return;
@@ -828,26 +789,19 @@
 
     const globalTarget = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const logBadge = (icon, label, bg) => {
-      console.log(
-        `%c${icon} ${label} → storeClosed=${state.storeClosed}`,
-        `color:#fff;background:${bg};padding:2px 8px;border-radius:4px;font-weight:bold;`
-      );
     };
 
     globalTarget.testClosed = () => {
       localStorage.setItem('clore_test_closed', 'closed');
       evaluateTick();
-      logBadge('🔴', 'CLOSED 강제', '#c0392b');
     };
     globalTarget.testOpen = () => {
       localStorage.setItem('clore_test_closed', 'open');
       evaluateTick();
-      logBadge('🟢', 'OPEN 강제', '#27ae60');
     };
     globalTarget.testClear = () => {
       localStorage.removeItem('clore_test_closed');
       evaluateTick();
-      logBadge('⚪', '오버라이드 해제 (실제시각)', '#7f8c8d');
     };
 
     globalTarget.playPromo = (n) => {
@@ -857,25 +811,23 @@
       })();
     };
     globalTarget.playClose = (m) => {
-      if (![30, 15, 5, 2].includes(m)) { console.warn('[Clore Core] playClose(30|15|5|2)'); return; }
+      if (![30, 15, 5, 2].includes(m)) { return; }
       playClose(m);
     };
 
     globalTarget.simulateAd = (on) => {
       if (on) {
-        if (state.adActive) { console.warn('[Clore Core] 이미 adActive=true'); return; }
+        if (state.adActive) { return; }
         state.adActive = true;
         state.adManaged = cfg.muteDuringAd?.enabled !== false;
-        console.log('[Clore Core] 🟠 광고 강제 시작 (시뮬레이션)');
         if (state.adManaged && !state.unitPlaying && !state.chainActive && !state.closePlaying) {
           engageMute();
           if (!state.quiet) runAdChain(false);
         }
       } else {
-        if (!state.adActive) { console.warn('[Clore Core] adActive 이미 false'); return; }
+        if (!state.adActive) { return; }
         state.adActive = false;
         state.adManaged = false;
-        console.log('[Clore Core] 🟢 광고 강제 종료 (시뮬레이션)');
         if (state.currentIsFiller && state.fillerAudio) {
           const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
           const wake = state.fillerResolve;
@@ -885,54 +837,19 @@
         if (!state.closePlaying && !state.unitPlaying) restoreVideo(CROSS_MS());
       }
     };
-    globalTarget.syncClock = () => syncClock('수동').then(() => globalTarget.stateNow());
+    globalTarget.syncClock = () => syncClock('manual').then(() => globalTarget.stateNow());
     globalTarget.forceCloseLogClear = () => {
       localStorage.removeItem(CLOSE_LOG_KEY);
       localStorage.removeItem(PAUSE_LOG_KEY);
       state.playedCloseOffsets.clear();
       state.closeRetryAt = {};
       state.pauseDone = false;
-      console.log('[Clore Core] 마감 이력·자동정지 플래그 초기화 — 오늘 것을 처음부터 다시 판정');
     };
     globalTarget.forceWatchdog = () => {
       state.lastAudioAt = monoNow() - (cfg.audio.intervalMin * 60 * 1000) - 1000;
-      console.log('[Clore Core] ⏱ lastAudioAt을 15분+ 전으로 조작 — 다음 TICK(≤1초)에 워치독 발동');
     };
     globalTarget.stateNow = () => {
-      console.log('[Clore Core] state:', {
-        workerAlive: state.workerAlive,
-        storeClosed: state.storeClosed,
-        quiet: state.quiet,
-        pauseDone: state.pauseDone,
-        videoPaused: document.querySelector('video')?.paused ?? null,
-        clockOffsetSec: Math.round(clockOffsetMs / 100) / 10,
-        clockSyncOk,
-        realNow: nowReal().toLocaleString('ko-KR'),
-        localNow: new Date().toLocaleString('ko-KR'),
-        audioCtxState: sharedCtx ? sharedCtx.state : 'none',
-        closeRetryAt: Object.keys(state.closeRetryAt),
-        playedCloseOffsets: [...state.playedCloseOffsets],
-        adActive: state.adActive,
-        adManaged: state.adManaged,
-        chainActive: state.chainActive,
-        unitPlaying: state.unitPlaying,
-        closePlaying: state.closePlaying,
-        currentIsFiller: state.currentIsFiller,
-        muteHold: state.muteHold,
-        promoActive: state.promoActive,
-        activeFrom: cfg.audio?.activeFrom ?? null,
-        activeUntil: cfg.audio?.activeUntil ?? null,
-        lastPromoType: state.lastPromoType,
-        minsSinceLastPromo: Math.round((monoNow() - state.lastAudioAt) / 60000),
-        lastDiffMin: state.lastDiffMin === null ? null : Math.round(state.lastDiffMin * 10) / 10,
-        tabVisible: document.visibilityState,
-      });
     };
 
-    console.log(`[Clore Core] v4.2 로딩 완료 — 정숙구간 ${QUIET_FROM_MIN}분 / 자동정지 ${PAUSE_AT_MIN}분 전 1회 / YouTube 정지락 폐기`);
-    console.log('[Clore Core] 테스트: testClosed() / testOpen() / testClear()');
-    console.log('[Clore Core] 오디오: playPromo(1|2) / playClose(30|15|5|2) / stateNow()');
-    console.log('[Clore Core] 체인/워치독 재현: simulateAd(true|false) / forceWatchdog()');
-    console.log('[Clore Core] 시각/이력: syncClock() / forceCloseLogClear()');
   }
 })();
