@@ -131,12 +131,18 @@
 
       promoActive: null,
       lastPromoType: 2,
+      lastFillerUrl: '',
+      nextFiller: '',
       lastAudioAt: monoNow(),
-      workerAlive: false,
+      closeSkipLogged: new Set(),
+      tickSource: null,
+      lastTickAt: 0,
+      tickCounts: { interval: 0, audio: 0, visible: 0, manual: 0, boot: 0 },
     };
     const blobCache = {};
     const activeTracks = new Set();
-    const CLOSE_CATCHUP_MIN = 1.5;
+    const CLOSE_LATE_MAX_MIN = 3;
+    const TICK_MIN_GAP_MS = 400;
     const CLOSE_LOCK_MIN = 30;
     const QUIET_FROM_MIN = Number.isFinite(Number(cfg.closing?.quietFromMin ?? cfg.closing?.promoOffMin))
       ? Number(cfg.closing.quietFromMin ?? cfg.closing.promoOffMin) : 40;
@@ -148,9 +154,72 @@
     function getCtx() {
       if (!sharedCtx || sharedCtx.state === 'closed') {
         sharedCtx = new (window.AudioContext || window.webkitAudioContext)();
+        try {
+          if (typeof sharedCtx.addEventListener === 'function') {
+            sharedCtx.addEventListener('statechange', () => armHeartbeat());
+          }
+        } catch (_) {}
       }
       if (sharedCtx.state === 'suspended') sharedCtx.resume().catch(() => {});
       return sharedCtx;
+    }
+
+    function silentSource(durSec, onEnded) {
+      const ctx = sharedCtx;
+      if (!ctx || ctx.state !== 'running') return null;
+      try {
+        const src = ctx.createConstantSource ? ctx.createConstantSource() : ctx.createOscillator();
+        const g = ctx.createGain();
+        g.gain.value = 0;
+        src.connect(g);
+        g.connect(ctx.destination);
+        let fired = false;
+        const done = () => {
+          if (fired) return;
+          fired = true;
+          try { src.disconnect(); g.disconnect(); } catch (_) {}
+          onEnded();
+        };
+        src.addEventListener('ended', done, { once: true });
+        const t = ctx.currentTime;
+        src.start(t);
+        src.stop(t + durSec);
+        return { cancel: () => { fired = true; try { src.disconnect(); g.disconnect(); } catch (_) {} } };
+      } catch (e) {
+        return null;
+      }
+    }
+    function audioWait(ms) {
+      return new Promise((resolve) => {
+        let done = false;
+        let timer;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const hb = silentSource(ms / 1000, finish);
+        timer = setTimeout(finish, hb ? ms + 2500 : ms);
+      });
+    }
+
+    const hbState = { token: 0, armed: false, armedAt: 0, beats: 0 };
+    function armHeartbeat() {
+      const ctx = sharedCtx;
+      if (!ctx || ctx.state !== 'running') return;
+      if (hbState.armed && monoNow() - hbState.armedAt < 3000) return;
+      const my = ++hbState.token;
+      hbState.armed = true;
+      hbState.armedAt = monoNow();
+      const ok = silentSource(1, () => {
+        if (my !== hbState.token) return;
+        hbState.armed = false;
+        hbState.beats += 1;
+        armHeartbeat();
+        runTick('audio');
+      });
+      if (!ok) hbState.armed = false;
     }
     const safeGain = (v) => {
       const n = Number(v);
@@ -160,11 +229,12 @@
       Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
 
     const allTracks = [
-      ...(cfg.audio?.tracks || []),
-      ...(cfg.filler?.track ? [cfg.filler.track] : []),
+      ...promoEntries().map(e => e.url),
       ...cfg.closing.offsetsMin.map(m => `${cfg.closing.baseUrl}${m}m.mp3`),
     ];
     allTracks.forEach(preload);
+    state.nextFiller = pickFiller();
+    if (state.nextFiller) preload(state.nextFiller);
     function preload(url) {
       if (!GMXHR) { blobCache[url] = url; return; }
       GMXHR({
@@ -176,20 +246,33 @@
       });
     }
 
+    const fadeSteps = new Set();
+    function stepFades() { [...fadeSteps].forEach((f) => f()); }
     function fadeTo(el, target, ms, onDone) {
       const token = (el.__cloreFade = (el.__cloreFade || 0) + 1);
       el.__cloreFadeActive = true;
       const start = el.volume;
       const t0 = performance.now();
-      (function tick() {
-        if (el.__cloreFade !== token) return;
+      let timer = null;
+      const cancel = () => { fadeSteps.delete(step); clearTimeout(timer); };
+      const step = () => {
+        if (!fadeSteps.has(step)) return;
+        if (el.__cloreFade !== token) { cancel(); return; }
         const p = Math.min((performance.now() - t0) / ms, 1);
         const eased = 0.5 - 0.5 * Math.cos(p * Math.PI);
         el.volume = Math.min(1, Math.max(0, start + (target - start) * eased));
-        if (p < 1) { setTimeout(tick, 25); return; }
+        if (p < 1) return;
+        cancel();
         el.__cloreFadeActive = false;
         onDone?.();
-      })();
+      };
+      const loop = () => {
+        if (!fadeSteps.has(step)) return;
+        step();
+        if (fadeSteps.has(step)) timer = setTimeout(loop, 25);
+      };
+      fadeSteps.add(step);
+      loop();
     }
     function fadeGainTo(gainNode, target, ms, onDone) {
       if (!gainNode) { onDone?.(); return; }
@@ -230,6 +313,8 @@
         const ctx = getCtx();
         const peak = Math.min(0.4 * safeGain(volume), 1.0);
         const notes = [523, 659, 784];
+        let timer;
+        const finish = () => { clearTimeout(timer); resolve(); };
         notes.forEach((freq, i) => {
           const osc  = ctx.createOscillator();
           const gain = ctx.createGain();
@@ -242,9 +327,12 @@
           gain.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
           osc.start(t);
           osc.stop(t + 0.6);
-          osc.addEventListener('ended', () => { try { gain.disconnect(); } catch (_) {} }, { once: true });
+          osc.addEventListener('ended', () => {
+            try { gain.disconnect(); } catch (_) {}
+            if (i === notes.length - 1) finish();
+          }, { once: true });
         });
-        setTimeout(resolve, notes.length * 350 + 500);
+        timer = setTimeout(finish, notes.length * 350 + 500 + (ctx.state === 'running' ? 2500 : 0));
       });
     }
 
@@ -313,7 +401,9 @@
           resolve(null);
         }, { once: true });
         if (a.readyState >= 3) start();
-        else a.addEventListener('canplaythrough', start, { once: true });
+        else {
+          ['canplaythrough', 'canplay', 'loadeddata'].forEach((ev) => a.addEventListener(ev, start, { once: true }));
+        }
         setTimeout(start, 3000);
       });
     }
@@ -345,13 +435,37 @@
       return nowReal() <= new Date(`${until}T23:59:59`);
     };
 
+    function promoEntries() {
+      const list = Array.isArray(cfg.audio?.tracks) ? cfg.audio.tracks : [];
+      return list.map((t) => (typeof t === 'string' ? { url: t } : t)).filter((t) => t && typeof t.url === 'string' && t.url);
+    }
+    function promoDay() {
+      const d = nowReal();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    function promoActiveUrls() {
+      const day = promoDay();
+      const DAY = /^\d{4}-\d{2}-\d{2}$/;
+      const urls = [];
+      for (const e of promoEntries()) {
+        if (e.from && !(DAY.test(e.from) && day >= e.from)) continue;
+        if (e.until && !(DAY.test(e.until) && day <= e.until)) continue;
+        urls.push(e.url);
+        if (urls.length === 2) break;
+      }
+      return urls;
+    }
+
     async function playPromoUnit(n) {
       if (state.quiet) {
         return;
       }
       const token = state.stopToken;
-      const url = cfg.audio?.tracks?.[n - 1];
-      if (!url) { return; }
+      const url = promoActiveUrls()[n - 1];
+      if (!url) {
+        state.lastAudioAt = monoNow();
+        return;
+      }
       state.unitPlaying = true;
       state.lastAudioAt = monoNow();
       engageMute();
@@ -372,18 +486,37 @@
     }
 
     async function playClose(min) {
-      const url = `${cfg.closing.baseUrl}${min}m.mp3`;
       const repeat = min === 30 ? 1 : 2;
-      stopNonCloseAudio(`close-${min}`);
-      state.closePlaying = true;
-      engageMute();
-      let heard = 0;
-      for (let i = 0; i < repeat; i++) {
-        await playChime(cfg.closing?.volume);
-        const t = await createTrack(url, cfg.closing?.volume, 0, 'close');
-        if (t) { heard++; await waitTrackEnded(t.audio, 60000); }
-        if (i < repeat - 1) await new Promise(r => setTimeout(r, 1000));
-      }
+      let finished = false;
+      const body = (async () => {
+        const url = `${cfg.closing.baseUrl}${min}m.mp3`;
+        stopNonCloseAudio(`close-${min}`);
+        state.closePlaying = true;
+        engageMute();
+        let heard = 0;
+        try {
+          for (let i = 0; i < repeat; i++) {
+            await playChime(cfg.closing?.volume);
+            const t = await createTrack(url, cfg.closing?.volume, 0, 'close');
+            if (t) { heard++; await waitTrackEnded(t.audio, 60000); }
+            if (i < repeat - 1) await audioWait(1000);
+          }
+        } catch (e) {
+          heard = 0;
+        }
+        return heard;
+      })();
+      const t0 = monoNow();
+      const guard = new Promise((resolve) => {
+        const check = () => {
+          if (finished) return;
+          if (monoNow() - t0 >= 180000) { resolve(-1); return; }
+          setTimeout(check, 5000);
+        };
+        setTimeout(check, 5000);
+      });
+      const heard = await Promise.race([body, guard]);
+      finished = true;
       state.closePlaying = false;
       if (isAdShowing()) {
         state.adActive = true;
@@ -391,14 +524,34 @@
       } else {
         restoreVideo(CROSS_MS());
       }
+      if (heard < 0) { return false; }
       if (!heard) { return false; }
       return true;
     }
 
+    function fillerUrls() {
+      const f = cfg.filler || {};
+      const toUrl = (x) => (/^https?:\/\//.test(x) ? x : `${BASE}/audio/filler/${x}`);
+      if (Array.isArray(f.tracks)) {
+        const list = f.tracks.filter((x) => typeof x === 'string' && x).map(toUrl);
+        if (list.length) return list;
+      }
+      return f.track ? [f.track] : [];
+    }
+    function pickFiller() {
+      const list = fillerUrls();
+      if (list.length <= 1) return list[0] || '';
+      const pool = list.filter((u) => u !== state.lastFillerUrl);
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+
     function playFillerOnce() {
       return new Promise(async (resolve) => {
-        const url = cfg.filler?.track;
+        const url = state.nextFiller || pickFiller();
         if (!url) { resolve(false); return; }
+        state.lastFillerUrl = url;
+        state.nextFiller = pickFiller();
+        if (state.nextFiller && !blobCache[state.nextFiller]) preload(state.nextFiller);
         const t = await createTrack(url, 1, cfg.muteDuringAd?.fadeMs || 300, 'filler');
         if (!t) { setTimeout(() => resolve(false), 3000); return; }
         state.currentIsFiller = true;
@@ -457,7 +610,8 @@
     }
 
     async function watchdogFire() {
-      const n = state.lastPromoType === 1 ? 2 : 1;
+      let n = state.lastPromoType === 1 ? 2 : 1;
+      if (n === 2 && promoActiveUrls().length < 2) n = 1;
       await playPromoUnit(n);
       if (state.adActive && state.adManaged && !state.quiet) {
         runAdChain(true);
@@ -562,7 +716,11 @@
       state.playedCloseOffsets = loadCloseLog(key);
       state.closeRetryAt = {};
       state.pauseDone = loadPauseDone(key);
+      state.closeSkipLogged = new Set();
       state.lastDiffMin = null;
+      const season = isSummerSeason(now) ? 'summer' : 'winter';
+      const ct = getCloseTime(now);
+      const hhmm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
       if (state.playedCloseOffsets.size) {
       }
     }
@@ -600,31 +758,35 @@
     function evaluateClosingBroadcasts(diff) {
       if (diff <= 0) return;
       const offsets = [...cfg.closing.offsetsMin].sort((a, b) => b - a);
-
-      for (const min of offsets) {
-        if (!state.closeRetryAt[min] || state.playedCloseOffsets.has(min)) continue;
-        const nextSmaller = offsets.filter(m => m < min)[0] ?? 0;
-        if (diff > min || diff <= nextSmaller) { delete state.closeRetryAt[min]; continue; }
-        if (monoNow() < state.closeRetryAt[min]) continue;
-        delete state.closeRetryAt[min];
-        fireCloseOnce(min, 'retry');
-        return;
-      }
-
       let due = null;
-      if (state.lastDiffMin === null) {
-        due = offsets.find(min => diff <= min && diff > min - CLOSE_CATCHUP_MIN);
-      } else {
-        const crossed = offsets.filter(min => state.lastDiffMin > min && diff <= min);
-        due = crossed.length ? Math.min(...crossed) : null;
-        crossed.filter(m => m !== due).forEach(m => {
-          markClose(m);
-        });
+      for (const min of offsets) {
+        if (state.playedCloseOffsets.has(min)) continue;
+        const nextSmaller = offsets.filter(m => m < min)[0] ?? 0;
+        const lo = Math.max(min - CLOSE_LATE_MAX_MIN, nextSmaller);
+        if (diff > min) continue;
+        if (diff > lo) {
+          const retryAt = state.closeRetryAt[min];
+          if (retryAt && monoNow() < retryAt) continue;
+          if (due === null) due = min;
+          continue;
+        }
+        delete state.closeRetryAt[min];
+        if (!state.closeSkipLogged.has(min)) {
+          state.closeSkipLogged.add(min);
+        }
       }
-      if (Number.isFinite(due)) fireCloseOnce(due, state.lastDiffMin === null ? 'initial-catchup' : 'crossing');
+      if (due !== null && !state.closePlaying) fireCloseOnce(due, 'window');
     }
 
-    function evaluateTick() {
+    function evaluateTick(source, force) {
+      const mono = monoNow();
+      if (!force && state.lastTickMono !== undefined && mono - state.lastTickMono < TICK_MIN_GAP_MS) return;
+      state.lastTickMono = mono;
+      state.lastTickAt = Date.now();
+      const src = source || 'manual';
+      state.tickSource = src;
+      state.tickCounts[src] = (state.tickCounts[src] || 0) + 1;
+      stepFades();
       detectClockJump();
       if (monoNow() - clockSyncedMono >= CLOCK_RESYNC_MS) syncClock('periodic-resync');
       const now = nowReal();
@@ -654,14 +816,12 @@
         const wasClosed = state.storeClosed === true;
         state.storeClosed = false;
         if (wasClosed) {
-          state.lastDiffMin = null;
           state.lastAudioAt = monoNow();
         } else {
         }
       }
 
-      if (state.lastDiffMin !== null && diff > 0
-          && state.lastDiffMin > PAUSE_AT_MIN && diff <= PAUSE_AT_MIN) {
+      if (diff > 0 && diff <= PAUSE_AT_MIN) {
         stopPlaybackOnce(`${PAUSE_AT_MIN} min before close`);
       }
 
@@ -704,6 +864,7 @@
 
     function evaluateMuteTick() {
       renderUnlockBadge();
+      stepFades();
       const video = document.querySelector('video');
       if (state.muteHold && video && !video.muted) video.muted = true;
       if (state.adActive && state.adManaged) {
@@ -735,50 +896,34 @@
     }
     function unlockAudio() {
       const ctx = getCtx();
-      Promise.resolve(ctx.resume()).catch(() => {}).finally(renderUnlockBadge);
+      Promise.resolve(ctx.resume()).catch(() => {}).finally(() => { renderUnlockBadge(); armHeartbeat(); });
       setTimeout(renderUnlockBadge, 300);
     }
     ['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
       document.addEventListener(ev, unlockAudio, { capture: true, passive: true }));
     unlockAudio();
 
-    syncClock('boot').then(() => evaluateTick());
+    const runTick = (source, force) => {
+      try { evaluateTick(source, force); } catch (e) { }
+    };
+    const runMuteTick = () => {
+      try { evaluateMuteTick(); } catch (e) { }
+    };
 
-    evaluateTick();
-    evaluateMuteTick();
+    syncClock('boot').then(() => runTick('boot', true));
+
+    runTick('boot', true);
+    runMuteTick();
     syncAdState();
 
-    (function startWorker() {
-      const workerSrc = [
-        "setInterval(function(){ postMessage({type:'TICK'}); }, 1000);",
-        "setInterval(function(){ postMessage({type:'MUTE_TICK'}); }, 250);",
-      ].join('\n');
-      try {
-        const blobUrl = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
-        let workerUrl = blobUrl;
-        if (window.trustedTypes && trustedTypes.createPolicy) {
-          try {
-            const p = trustedTypes.createPolicy('clore-worker', { createScriptURL: s => s });
-            workerUrl = p.createScriptURL(blobUrl);
-          } catch (_) {}
-        }
-        const worker = new Worker(workerUrl);
-        worker.onmessage = (e) => {
-          if (e.data?.type === 'TICK') evaluateTick();
-          else if (e.data?.type === 'MUTE_TICK') evaluateMuteTick();
-        };
-        state.workerAlive = true;
-      } catch (e) {
-        state.workerAlive = false;
-        setInterval(evaluateTick, 1000);
-        setInterval(evaluateMuteTick, 250);
-      }
-    })();
+    setInterval(() => { armHeartbeat(); runTick('interval'); }, 1000);
+    setInterval(runMuteTick, 250);
+    armHeartbeat();
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      if (monoNow() - clockSyncedMono > 60000) syncClock('tab-visible').then(() => evaluateTick());
-      evaluateTick();
+      if (monoNow() - clockSyncedMono > 60000) syncClock('tab-visible').then(() => runTick('visible', true));
+      runTick('visible', true);
       const video = document.querySelector('video');
       if (!video) return;
       wireMuteGuard(video);
@@ -793,15 +938,15 @@
 
     globalTarget.testClosed = () => {
       localStorage.setItem('clore_test_closed', 'closed');
-      evaluateTick();
+      runTick('manual', true);
     };
     globalTarget.testOpen = () => {
       localStorage.setItem('clore_test_closed', 'open');
-      evaluateTick();
+      runTick('manual', true);
     };
     globalTarget.testClear = () => {
       localStorage.removeItem('clore_test_closed');
-      evaluateTick();
+      runTick('manual', true);
     };
 
     globalTarget.playPromo = (n) => {
@@ -843,6 +988,7 @@
       localStorage.removeItem(PAUSE_LOG_KEY);
       state.playedCloseOffsets.clear();
       state.closeRetryAt = {};
+      state.closeSkipLogged = new Set();
       state.pauseDone = false;
     };
     globalTarget.forceWatchdog = () => {
