@@ -27,9 +27,7 @@
     "intervalMin": 15,
     "volume": 3,
     "activeUntil": "2026-10-18",
-    "tracks": [
-      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/promo.m4a"
-    ]
+    "tracks": []
   },
   "filler": {
     "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
