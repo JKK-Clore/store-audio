@@ -27,7 +27,9 @@
     "intervalMin": 15,
     "volume": 3,
     "activeUntil": "2026-10-18",
-    "tracks": []
+    "tracks": [
+      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/ayriana-halloween-promo-good.m4a"
+    ]
   },
   "filler": {
     "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
