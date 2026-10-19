@@ -25,7 +25,7 @@
   "audio": {
     "enabled": true,
     "intervalMin": 15,
-    "volume": 2,
+    "volume": 1,
     "activeFrom": "2026-10-19",
     "activeUntil": "2026-11-01",
     "tracks": [
