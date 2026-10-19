@@ -28,7 +28,9 @@
     "volume": 3,
     "activeFrom": "2026-10-19",
     "activeUntil": "2026-11-01",
-    "tracks": []
+    "tracks": [
+      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a"
+    ]
   },
   "filler": {
     "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
