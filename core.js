@@ -435,6 +435,7 @@
       return nowReal() <= new Date(`${until}T23:59:59`);
     };
 
+    const MY_BRANCH = String(window.CLORE_BRANCH || '').trim().toUpperCase();
     function promoEntries() {
       const list = Array.isArray(cfg.audio?.tracks) ? cfg.audio.tracks : [];
       return list.map((t) => (typeof t === 'string' ? { url: t } : t)).filter((t) => t && typeof t.url === 'string' && t.url);
@@ -443,17 +444,25 @@
       const d = nowReal();
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     }
+    function promoAudience(e) {
+      const a = String(e.audience == null ? '' : e.audience).trim().toUpperCase();
+      return a === 'ALL' || a === '*' ? '' : a;
+    }
     function promoActiveUrls() {
       const day = promoDay();
       const DAY = /^\d{4}-\d{2}-\d{2}$/;
-      const urls = [];
+      const general = [];
+      const mine = [];
       for (const e of promoEntries()) {
         if (e.from && !(DAY.test(e.from) && day >= e.from)) continue;
         if (e.until && !(DAY.test(e.until) && day <= e.until)) continue;
-        urls.push(e.url);
-        if (urls.length === 2) break;
+        const aud = promoAudience(e);
+        if (!aud) general.push(e.url);
+        else if (MY_BRANCH && aud === MY_BRANCH) mine.push(e.url);
       }
-      return urls;
+      if (!mine.length) return general.slice(0, 2);
+      if (!general.length) return mine.slice(0, 2);
+      return [general[0], mine[0]];
     }
 
     async function playPromoUnit(n) {
@@ -779,6 +788,7 @@
     }
 
     function evaluateTick(source, force) {
+      try { cwGuard(); } catch (e) { }
       const mono = monoNow();
       if (!force && state.lastTickMono !== undefined && mono - state.lastTickMono < TICK_MIN_GAP_MS) return;
       state.lastTickMono = mono;
@@ -850,16 +860,72 @@
         watchdogFire();
       }
 
-      if (cfg.continueWatchingDialog?.enabled) {
-        const official = document.querySelector('.ytp-confirm-dialog-renderer-button-primary');
-        if (official) { official.click(); return; }
-        const fallback = [...document.querySelectorAll('button')].find(b =>
-          /^(yes|\uC608)$/i.test((b.textContent || '').trim())
-        );
-        if (fallback && /paused|continue watching|\uC77C\uC2DC\uC815\uC9C0/i.test(document.body.innerText || '')) {
-          fallback.click();
-        }
+    }
+
+    const CW_RESUME_GAP_MS = 30000;
+    const CW_USER_ACT_MS = 3000;
+    state.cwResumes = 0;
+    state.cwLastResumeMono = null;
+    state.cwUserActMono = null;
+    state.cwUserPaused = false;
+    state.cwSawPlaying = false;
+    function noteUserAct(ev) {
+      if (ev && ev.isTrusted === false) return;
+      state.cwUserActMono = monoNow();
+    }
+    ['pointerdown', 'mousedown', 'click', 'keydown', 'touchstart'].forEach(ev =>
+      document.addEventListener(ev, noteUserAct, { capture: true, passive: true }));
+    document.addEventListener('pause', (ev) => {
+      if (ev && ev.target && ev.target.tagName && String(ev.target.tagName).toUpperCase() !== 'VIDEO') return;
+      state.cwUserPaused = state.cwUserActMono !== null && monoNow() - state.cwUserActMono <= CW_USER_ACT_MS;
+    }, true);
+    ['play', 'playing'].forEach(name => document.addEventListener(name, (ev) => {
+      if (ev && ev.target && ev.target.tagName && String(ev.target.tagName).toUpperCase() !== 'VIDEO') return;
+      state.cwUserPaused = false;
+      state.cwSawPlaying = true;
+    }, true));
+
+    function cwActive() {
+      return !!cfg.continueWatchingDialog?.enabled;
+    }
+    function keepYouTubeAwake() {
+      if (!cwActive() || state.quiet === true) return;
+      try { window._lact = Date.now(); } catch (_) {}
+    }
+    function dismissContinueWatching() {
+      if (!cwActive()) return false;
+      const official = document.querySelector('.ytp-confirm-dialog-renderer-button-primary');
+      if (official) { official.click(); return true; }
+      const fallback = [...document.querySelectorAll('button')].find(b =>
+        /^(yes|\uC608)$/i.test((b.textContent || '').trim())
+      );
+      if (fallback && /paused|continue watching|\uC77C\uC2DC\uC815\uC9C0/i.test(document.body.innerText || '')) {
+        fallback.click();
+        return true;
       }
+      return false;
+    }
+    function resumeIfStalled() {
+      if (!cwActive()) return;
+      const video = document.querySelector('video');
+      if (!video) return;
+      if (!video.paused) { state.cwSawPlaying = true; return; }
+      if (!state.cwSawPlaying || state.cwUserPaused || video.ended) return;
+      if (state.quiet !== false || state.storeClosed !== false || state.pauseDone) return;
+      if (state.muteHold || state.adActive || state.closePlaying || state.unitPlaying || state.chainActive) return;
+      if (state.cwUserActMono !== null && monoNow() - state.cwUserActMono <= CW_USER_ACT_MS) return;
+      if (state.cwLastResumeMono !== null && monoNow() - state.cwLastResumeMono < CW_RESUME_GAP_MS) return;
+      state.cwLastResumeMono = monoNow();
+      state.cwResumes += 1;
+      try {
+        const p = video.play();
+        if (p && p.catch) p.catch(() => {});
+      } catch (_) {}
+    }
+    function cwGuard() {
+      keepYouTubeAwake();
+      if (dismissContinueWatching()) return;
+      resumeIfStalled();
     }
 
     function evaluateMuteTick() {
@@ -907,6 +973,7 @@
       try { evaluateTick(source, force); } catch (e) { }
     };
     const runMuteTick = () => {
+      try { cwGuard(); } catch (e) { }
       try { evaluateMuteTick(); } catch (e) { }
     };
 
@@ -922,6 +989,7 @@
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
+      try { cwGuard(); } catch (e) { }
       if (monoNow() - clockSyncedMono > 60000) syncClock('tab-visible').then(() => runTick('visible', true));
       runTick('visible', true);
       const video = document.querySelector('video');
