@@ -36,7 +36,10 @@
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/bloor-st-w-copy.m4a",
           "until": "2026-11-19"
         },
-        "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a"
+        {
+          "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a",
+          "until": "2026-11-19"
+        }
       ],
       "SCB": [
         "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a",
