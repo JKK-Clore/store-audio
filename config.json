@@ -26,8 +26,6 @@
     "enabled": true,
     "intervalMin": 15,
     "volume": 1,
-    "activeFrom": "2026-10-19",
-    "activeUntil": "2026-11-01",
     "tracks": [
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a",
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/bloor-st-w-copy.m4a"
