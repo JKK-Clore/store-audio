@@ -436,9 +436,9 @@
     };
 
     const MY_BRANCH = String(window.CLORE_BRANCH || '').trim().toUpperCase();
-    function promoEntries() {
-      const list = Array.isArray(cfg.audio?.tracks) ? cfg.audio.tracks : [];
-      return list.map((t) => (typeof t === 'string' ? { url: t } : t)).filter((t) => t && typeof t.url === 'string' && t.url);
+    function promoEntries(list) {
+      const src = Array.isArray(list) ? list : [];
+      return src.map((t) => (typeof t === 'string' ? { url: t } : t)).filter((t) => t && typeof t.url === 'string' && t.url);
     }
     function promoDay() {
       const d = nowReal();
@@ -448,14 +448,40 @@
       const a = String(e.audience == null ? '' : e.audience).trim().toUpperCase();
       return a === 'ALL' || a === '*' ? '' : a;
     }
+    const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+    function promoLive(e, day) {
+      if (e.from && !(DAY_RE.test(e.from) && day >= e.from)) return false;
+      if (e.until && !(DAY_RE.test(e.until) && day <= e.until)) return false;
+      return true;
+    }
+    const promoWarned = {};
+    function promoFirstTime(key) {
+      if (promoWarned[key]) return false;
+      promoWarned[key] = true;
+      return true;
+    }
+    function promoBranchList() {
+      const by = cfg.audio?.byBranch;
+      if (!by || typeof by !== 'object' || Array.isArray(by)) return null;
+      if (!MY_BRANCH) {
+        if (promoFirstTime('nobranch')) { }
+        return null;
+      }
+      const key = Object.keys(by).find((k) => String(k).trim().toUpperCase() === MY_BRANCH);
+      if (key === undefined || !Array.isArray(by[key])) {
+        if (promoFirstTime('nolist:' + MY_BRANCH)) { }
+        return [];
+      }
+      return promoEntries(by[key]);
+    }
     function promoActiveUrls() {
       const day = promoDay();
-      const DAY = /^\d{4}-\d{2}-\d{2}$/;
+      const mineOnly = promoBranchList();
+      if (mineOnly) return mineOnly.filter((e) => promoLive(e, day)).map((e) => e.url).slice(0, 2);
       const general = [];
       const mine = [];
-      for (const e of promoEntries()) {
-        if (e.from && !(DAY.test(e.from) && day >= e.from)) continue;
-        if (e.until && !(DAY.test(e.until) && day <= e.until)) continue;
+      for (const e of promoEntries(cfg.audio?.tracks)) {
+        if (!promoLive(e, day)) continue;
         const aud = promoAudience(e);
         if (!aud) general.push(e.url);
         else if (MY_BRANCH && aud === MY_BRANCH) mine.push(e.url);
