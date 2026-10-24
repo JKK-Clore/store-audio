@@ -43,10 +43,6 @@
       ],
       "SCB": [
         {
-          "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/radya-announcement-2.m4a",
-          "until": "2026-10-19"
-        },
-        {
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/radya-announcement-1.m4a",
           "until": "2026-11-19"
         }
