@@ -10,7 +10,26 @@
     .then(init)
     .catch(e => void 0);
 
-  function init(cfg) {
+  function sheetOf(cfg, branch) {
+    const by = cfg && cfg.branches;
+    if (!branch || !by || typeof by !== 'object' || Array.isArray(by)) return null;
+    const key = Object.keys(by).find((k) => String(k).trim().toUpperCase() === branch);
+    const s = key === undefined ? null : by[key];
+    return s && typeof s === 'object' && !Array.isArray(s) ? s : null;
+  }
+  function overlay(base, top) {
+    const out = Object.assign({}, base);
+    Object.keys(top).forEach((k) => {
+      const a = out[k], b = top[k];
+      out[k] = a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b) ? overlay(a, b) : b;
+    });
+    return out;
+  }
+
+  function init(rawCfg) {
+    const SHEET = sheetOf(rawCfg, String(window.CLORE_BRANCH || '').trim().toUpperCase());
+    const cfg = SHEET ? overlay(rawCfg, SHEET) : rawCfg;
+    if (SHEET) void 0;
     const monoNow = () => performance.now();
     let clockOffsetMs = 0;
     let clockSyncedMono = -Infinity;
@@ -474,21 +493,37 @@
       }
       return promoEntries(by[key]);
     }
-    function promoActiveUrls() {
+    function promoActiveEntries() {
       const day = promoDay();
       const mineOnly = promoBranchList();
-      if (mineOnly) return mineOnly.filter((e) => promoLive(e, day)).map((e) => e.url).slice(0, 2);
+      if (mineOnly) return mineOnly.filter((e) => promoLive(e, day)).slice(0, 2);
       const general = [];
       const mine = [];
       for (const e of promoEntries(cfg.audio?.tracks)) {
         if (!promoLive(e, day)) continue;
         const aud = promoAudience(e);
-        if (!aud) general.push(e.url);
-        else if (MY_BRANCH && aud === MY_BRANCH) mine.push(e.url);
+        if (!aud) general.push(e);
+        else if (MY_BRANCH && aud === MY_BRANCH) mine.push(e);
       }
       if (!mine.length) return general.slice(0, 2);
       if (!general.length) return mine.slice(0, 2);
       return [general[0], mine[0]];
+    }
+    function promoActiveUrls() { return promoActiveEntries().map((e) => e.url); }
+    function entryVolume(e) {
+      const v = e && e.volume;
+      return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : promoVolume();
+    }
+    function promoVolume() {
+      const sv = SHEET?.audio?.volume;
+      if (typeof sv === 'number' && Number.isFinite(sv) && sv >= 0) return sv;
+      const by = cfg.audio?.volumeByBranch;
+      if (MY_BRANCH && by && typeof by === 'object' && !Array.isArray(by)) {
+        const key = Object.keys(by).find((k) => String(k).trim().toUpperCase() === MY_BRANCH);
+        const v = key === undefined ? undefined : by[key];
+        if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+      }
+      return cfg.audio?.volume;
     }
 
     async function playPromoUnit(n) {
@@ -496,7 +531,8 @@
         return;
       }
       const token = state.stopToken;
-      const url = promoActiveUrls()[n - 1];
+      const entry = promoActiveEntries()[n - 1];
+      const url = entry && entry.url;
       if (!url) {
         state.lastAudioAt = monoNow();
         return;
@@ -504,12 +540,13 @@
       state.unitPlaying = true;
       state.lastAudioAt = monoNow();
       engageMute();
-      await playChime(cfg.audio?.volume);
+      const volume = entryVolume(entry);
+      await playChime(volume);
       if (state.quiet || token !== state.stopToken) {
         state.unitPlaying = false;
         return;
       }
-      const t = await createTrack(url, cfg.audio?.volume, 0, 'promo');
+      const t = await createTrack(url, volume, 0, 'promo');
       if (t) await waitTrackEnded(t.audio, 60000);
       if (state.quiet || token !== state.stopToken) {
         state.unitPlaying = false;
