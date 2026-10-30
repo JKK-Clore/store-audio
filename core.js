@@ -247,9 +247,35 @@
     const withTimeout = (p, ms, fallback) =>
       Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
 
+    function closePlan() {
+      const c = cfg.closing || {};
+      const out = [];
+      if (Array.isArray(c.recordings)) {
+        const seen = new Set();
+        for (const r of c.recordings) {
+          const min = Number(r && r.offsetMin);
+          const url = r && typeof r.url === 'string' ? r.url : '';
+          if (!url || !Number.isFinite(min) || min <= 0 || seen.has(min)) continue;
+          seen.add(min);
+          const vol = Number(r.volume);
+          out.push({ min, url, repeat: Number(r.repeat) === 1 ? 1 : 2, volume: Number.isFinite(vol) && vol >= 0 ? vol : c.volume });
+        }
+        return out;
+      }
+      for (const m of (Array.isArray(c.offsetsMin) ? c.offsetsMin : [])) {
+        out.push({ min: m, url: `${c.baseUrl}${m}m.mp3`, repeat: m === 30 ? 1 : 2, volume: c.volume });
+      }
+      return out;
+    }
+    function closeSpec(min) {
+      const hit = closePlan().find(x => x.min === min);
+      if (hit) return hit;
+      const c = cfg.closing || {};
+      return { min, url: `${c.baseUrl}${min}m.mp3`, repeat: min === 30 ? 1 : 2, volume: c.volume };
+    }
     const allTracks = [
       ...promoEntries().map(e => e.url),
-      ...cfg.closing.offsetsMin.map(m => `${cfg.closing.baseUrl}${m}m.mp3`),
+      ...closePlan().map(x => x.url),
     ];
     allTracks.forEach(preload);
     state.nextFiller = pickFiller();
@@ -558,18 +584,19 @@
     }
 
     async function playClose(min) {
-      const repeat = min === 30 ? 1 : 2;
+      const spec = closeSpec(min);
+      const repeat = spec.repeat;
       let finished = false;
       const body = (async () => {
-        const url = `${cfg.closing.baseUrl}${min}m.mp3`;
+        const url = spec.url;
         stopNonCloseAudio(`close-${min}`);
         state.closePlaying = true;
         engageMute();
         let heard = 0;
         try {
           for (let i = 0; i < repeat; i++) {
-            await playChime(cfg.closing?.volume);
-            const t = await createTrack(url, cfg.closing?.volume, 0, 'close');
+            await playChime(spec.volume);
+            const t = await createTrack(url, spec.volume, 0, 'close');
             if (t) { heard++; await waitTrackEnded(t.audio, 60000); }
             if (i < repeat - 1) await audioWait(1000);
           }
@@ -766,7 +793,7 @@
       return t;
     }
     function getOpenTime(now) {
-      const hm = now.getDay() === 0 ? cfg.closing.open.sun : cfg.closing.open.monSat;
+      const hm = now.getDay() === 0 ? cfg.closing.open.sun : (now.getDay() === 6 && cfg.closing.open.sat) ? cfg.closing.open.sat : cfg.closing.open.monSat;
       const [h, m] = hm.split(':').map(Number);
       const t = new Date(now);
       t.setHours(h, m, 0, 0);
@@ -829,7 +856,7 @@
     }
     function evaluateClosingBroadcasts(diff) {
       if (diff <= 0) return;
-      const offsets = [...cfg.closing.offsetsMin].sort((a, b) => b - a);
+      const offsets = closePlan().map(x => x.min).sort((a, b) => b - a);
       let due = null;
       for (const min of offsets) {
         if (state.playedCloseOffsets.has(min)) continue;
@@ -1087,7 +1114,7 @@
       })();
     };
     globalTarget.playClose = (m) => {
-      if (![30, 15, 5, 2].includes(m)) { return; }
+      if (![30, 15, 5, 2].includes(m) && !closePlan().some(x => x.min === m)) { return; }
       playClose(m);
     };
 
