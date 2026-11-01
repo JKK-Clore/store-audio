@@ -97,15 +97,15 @@
         },
         "recordings": [
           {
-            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/15m.mp3",
-            "offsetMin": 15,
-            "repeat": 2,
-            "volume": 1
-          },
-          {
             "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/30m.mp3",
             "offsetMin": 30,
             "repeat": 1,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/15m.mp3",
+            "offsetMin": 15,
+            "repeat": 2,
             "volume": 1
           },
           {
