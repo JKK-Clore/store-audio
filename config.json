@@ -56,5 +56,153 @@
   },
   "filler": {
     "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
+  },
+  "branches": {
+    "BLW": {
+      "audio": {
+        "enabled": true,
+        "intervalMin": 15,
+        "volume": 1
+      },
+      "filler": {
+        "tracks": [
+          "filler.m4a"
+        ]
+      },
+      "closing": {
+        "quietFromMin": 40,
+        "pauseAtMin": 15,
+        "offsetsMin": [
+          30,
+          15,
+          5,
+          2
+        ],
+        "volume": 1,
+        "open": {
+          "monSat": "09:30",
+          "sun": "11:00"
+        },
+        "hours": {
+          "summer": {
+            "monFri": "21:00",
+            "sat": "20:00",
+            "sun": "18:00"
+          },
+          "winter": {
+            "monFri": "20:00",
+            "sat": "19:00",
+            "sun": "18:00"
+          }
+        },
+        "recordings": [
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/15m.mp3",
+            "offsetMin": 15,
+            "repeat": 2,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/30m.mp3",
+            "offsetMin": 30,
+            "repeat": 1,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/5m.mp3",
+            "offsetMin": 5,
+            "repeat": 2,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/2m.mp3",
+            "offsetMin": 2,
+            "repeat": 2,
+            "volume": 1
+          }
+        ]
+      },
+      "muteDuringAd": {
+        "enabled": true,
+        "fadeMs": 300,
+        "crossfadeMs": 700
+      },
+      "continueWatchingDialog": {
+        "enabled": true
+      }
+    },
+    "SCB": {
+      "audio": {
+        "enabled": true,
+        "intervalMin": 15,
+        "volume": 1
+      },
+      "filler": {
+        "tracks": [
+          "filler.m4a"
+        ]
+      },
+      "closing": {
+        "quietFromMin": 40,
+        "pauseAtMin": 15,
+        "offsetsMin": [
+          30,
+          15,
+          5,
+          2
+        ],
+        "volume": 1,
+        "open": {
+          "monSat": "09:30",
+          "sun": "11:00"
+        },
+        "hours": {
+          "summer": {
+            "monFri": "21:00",
+            "sat": "20:00",
+            "sun": "18:00"
+          },
+          "winter": {
+            "monFri": "20:00",
+            "sat": "19:00",
+            "sun": "18:00"
+          }
+        },
+        "recordings": [
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/30m.mp3",
+            "offsetMin": 30,
+            "repeat": 1,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/15m.mp3",
+            "offsetMin": 15,
+            "repeat": 2,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/5m.mp3",
+            "offsetMin": 5,
+            "repeat": 2,
+            "volume": 1
+          },
+          {
+            "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/close/2m.mp3",
+            "offsetMin": 2,
+            "repeat": 2,
+            "volume": 1
+          }
+        ]
+      },
+      "muteDuringAd": {
+        "enabled": true,
+        "fadeMs": 300,
+        "crossfadeMs": 700
+      },
+      "continueWatchingDialog": {
+        "enabled": true
+      }
+    }
   }
 }
