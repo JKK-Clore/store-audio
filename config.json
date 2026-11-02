@@ -34,7 +34,7 @@
       "BLW": [
         {
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a",
-          "until": "2026-11-19"
+          "until": "2026-11-01"
         },
         {
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/bloor-st-w-copy.m4a",
@@ -45,6 +45,12 @@
         {
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a",
           "volume": 5
+        },
+        {
+          "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/clore-beauty-2-copy.m4a",
+          "until": "2026-11-01",
+          "volume": 1,
+          "via": "BLW"
         }
       ]
     }
