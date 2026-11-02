@@ -26,9 +26,7 @@
     "enabled": true,
     "intervalMin": 15,
     "volume": 1,
-    "tracks": [
-      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/bloor-st-w-copy.m4a"
-    ],
+    "tracks": [],
     "byBranch": {
       "BLW": [
         {
