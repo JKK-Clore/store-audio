@@ -41,7 +41,9 @@
           "until": "2026-11-19"
         }
       ],
-      "SCB": []
+      "SCB": [
+        "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a"
+      ]
     }
   },
   "filler": {
