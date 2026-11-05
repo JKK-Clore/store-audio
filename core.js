@@ -519,10 +519,53 @@
       }
       return promoEntries(by[key]);
     }
+    function storeAudioPlanOn_(lists, branch, day) {
+      var DAY = /^\d{4}-\d{2}-\d{2}$/;
+      var live = function (e) { return (!e.from || (DAY.test(e.from) && day >= e.from)) && (!e.until || (DAY.test(e.until) && day <= e.until)); };
+      var slots = (lists[branch] || []).filter(live).slice(0, 2).map(function (e) { return { e: e, src: '' }; });
+      if (slots.length >= 2) return slots;
+      var count = {}, pool = [];
+      Object.keys(lists).filter(function (c) { return c !== branch; }).sort().forEach(function (c) {
+        (lists[c] || []).filter(live).slice(0, 2).forEach(function (e) {
+          if (slots.some(function (s) { return s.e.url === e.url; })) return;
+          if (!count[e.url]) { count[e.url] = 0; pool.push({ e: e, src: c, at: pool.length }); }
+          count[e.url]++;
+        });
+      });
+      pool.sort(function (a, b) { return (count[b.e.url] - count[a.e.url]) || (a.at - b.at); });
+      return slots.concat(pool.slice(0, 2 - slots.length).map(function (p) { return { e: p.e, src: p.src }; }));
+    }
+    function promoLists() {
+      const by = cfg.audio?.byBranch;
+      const out = {};
+      Object.keys(by).forEach((k) => {
+        const code = String(k).trim().toUpperCase();
+        if (!/^[A-Z]{2,6}$/.test(code) || !Array.isArray(by[k])) return;
+        if (code !== MY_BRANCH) {
+          const sh = sheetOf(rawCfg, code);
+          const en = sh && sh.audio && sh.audio.enabled !== undefined ? sh.audio.enabled : rawCfg.audio?.enabled;
+          if (en === false) return;
+        }
+        out[code] = promoEntries(by[k]);
+      });
+      return out;
+    }
+    function branchVolume(code) {
+      const sv = sheetOf(rawCfg, code)?.audio?.volume;
+      if (typeof sv === 'number' && Number.isFinite(sv) && sv >= 0) return sv;
+      const by = rawCfg.audio?.volumeByBranch;
+      if (by && typeof by === 'object' && !Array.isArray(by)) {
+        const key = Object.keys(by).find((k) => String(k).trim().toUpperCase() === code);
+        const v = key === undefined ? undefined : by[key];
+        if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+      }
+      return rawCfg.audio?.volume;
+    }
     function promoActiveEntries() {
       const day = promoDay();
-      const mineOnly = promoBranchList();
-      if (mineOnly) return mineOnly.filter((e) => promoLive(e, day)).slice(0, 2);
+      if (promoBranchList() !== null) {
+        return storeAudioPlanOn_(promoLists(), MY_BRANCH, day).map((s) => (s.src ? Object.assign({}, s.e, { volume: typeof s.e.volume === 'number' ? s.e.volume : branchVolume(s.src) }) : s.e));
+      }
       const general = [];
       const mine = [];
       for (const e of promoEntries(cfg.audio?.tracks)) {
