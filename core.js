@@ -240,6 +240,18 @@
       });
       if (!ok) hbState.armed = false;
     }
+    const STORE_AUDIO_LEVEL_GAIN_ = { 1: 0.35, 2: 0.6, 3: 1, 4: 1.6, 5: 2.5 };
+    const STORE_AUDIO_LEVEL_DEFAULT_ = 3;
+    const levelOk = (v) => (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5 ? v : null);
+    const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+    const levelFromOldPromo = (v) => { const n = typeof v === 'number' ? v : NaN; return Number.isFinite(n) && n > 0 ? (n < 1.5 ? 3 : n < 2.5 ? 4 : 5) : null; };
+    const levelFromOldGain = (v) => { const n = num(v); return Number.isFinite(n) && n > 0 ? (n < 0.458 ? 1 : n < 0.775 ? 2 : n < 1.265 ? 3 : n <= 2 ? 4 : 5) : null; };
+    const elementLevel = (t) => {
+      if (!t || typeof t !== 'object') return null;
+      const lv = levelOk(t.level);
+      if (lv !== null) return lv;
+      return levelOk(t.volume) !== null ? levelFromOldPromo(t.volume) : null;
+    };
     const safeGain = (v) => {
       const n = Number(v);
       return Number.isFinite(n) && n >= 0 ? n : 1;
@@ -247,6 +259,10 @@
     const withTimeout = (p, ms, fallback) =>
       Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
 
+    function closeGain(r, c) {
+      const lv = levelOk(r && r.level) ?? (r ? levelFromOldGain(r.volume) : null) ?? levelFromOldGain(c && c.volume) ?? STORE_AUDIO_LEVEL_DEFAULT_;
+      return STORE_AUDIO_LEVEL_GAIN_[lv];
+    }
     function closePlan() {
       const c = cfg.closing || {};
       const out = [];
@@ -257,13 +273,12 @@
           const url = r && typeof r.url === 'string' ? r.url : '';
           if (!url || !Number.isFinite(min) || min <= 0 || seen.has(min)) continue;
           seen.add(min);
-          const vol = Number(r.volume);
-          out.push({ min, url, repeat: Number(r.repeat) === 1 ? 1 : 2, volume: Number.isFinite(vol) && vol >= 0 ? vol : c.volume });
+          out.push({ min, url, repeat: Number(r.repeat) === 1 ? 1 : 2, volume: closeGain(r, c) });
         }
         return out;
       }
       for (const m of (Array.isArray(c.offsetsMin) ? c.offsetsMin : [])) {
-        out.push({ min: m, url: `${c.baseUrl}${m}m.mp3`, repeat: m === 30 ? 1 : 2, volume: c.volume });
+        out.push({ min: m, url: `${c.baseUrl}${m}m.mp3`, repeat: m === 30 ? 1 : 2, volume: closeGain(null, c) });
       }
       return out;
     }
@@ -271,7 +286,7 @@
       const hit = closePlan().find(x => x.min === min);
       if (hit) return hit;
       const c = cfg.closing || {};
-      return { min, url: `${c.baseUrl}${min}m.mp3`, repeat: min === 30 ? 1 : 2, volume: c.volume };
+      return { min, url: `${c.baseUrl}${min}m.mp3`, repeat: min === 30 ? 1 : 2, volume: closeGain(null, c) };
     }
     const allTracks = [
       ...promoEntries().map(e => e.url),
@@ -390,12 +405,17 @@
         a.src = blobCache[url] || url;
         if (!blobCache[url]) void 0;
 
-        let source, gain;
+        let source, gain, limiter = null;
         try {
           source = ctx.createMediaElementSource(a);
           gain   = ctx.createGain();
           source.connect(gain);
-          gain.connect(ctx.destination);
+          if (safeGain(volume) > 1) {
+            limiter = ctx.createDynamicsCompressor();
+            limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20; limiter.attack.value = 0.003; limiter.release.value = 0.1;
+            gain.connect(limiter);
+            limiter.connect(ctx.destination);
+          } else gain.connect(ctx.destination);
         } catch (e) { resolve(null); return; }
 
         const targetGain = safeGain(volume);
@@ -404,7 +424,7 @@
         let settled = false;
         let track = null;
         const cleanup = () => {
-          try { gain.disconnect(); source.disconnect(); } catch (_) {}
+          try { gain.disconnect(); source.disconnect(); if (limiter) limiter.disconnect(); } catch (_) {}
           if (track) activeTracks.delete(track);
         };
         const fail = (why) => {
@@ -550,21 +570,28 @@
       });
       return out;
     }
-    function branchVolume(code) {
-      const sv = sheetOf(rawCfg, code)?.audio?.volume;
-      if (typeof sv === 'number' && Number.isFinite(sv) && sv >= 0) return sv;
+    function branchLevel(code) {
+      const sa = (code === MY_BRANCH ? SHEET : sheetOf(rawCfg, code))?.audio;
+      const lv = levelOk(sa?.level);
+      if (lv !== null) return lv;
+      const fromSheet = levelFromOldPromo(sa?.volume);
+      if (fromSheet !== null) return fromSheet;
       const by = rawCfg.audio?.volumeByBranch;
-      if (by && typeof by === 'object' && !Array.isArray(by)) {
+      if (code && by && typeof by === 'object' && !Array.isArray(by)) {
         const key = Object.keys(by).find((k) => String(k).trim().toUpperCase() === code);
-        const v = key === undefined ? undefined : by[key];
-        if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+        const v = key === undefined ? null : levelFromOldPromo(by[key]);
+        if (v !== null) return v;
       }
-      return rawCfg.audio?.volume;
+      return levelFromOldPromo(num(rawCfg.audio?.volume)) ?? STORE_AUDIO_LEVEL_DEFAULT_;
+    }
+    function borrowLevel(url) {
+      const bl = SHEET?.audio?.borrowLevels;
+      return (bl && typeof bl === 'object' && !Array.isArray(bl) ? levelOk(bl[url]) : null) ?? STORE_AUDIO_LEVEL_DEFAULT_;
     }
     function promoActiveEntries() {
       const day = promoDay();
       if (promoBranchList() !== null) {
-        return storeAudioPlanOn_(promoLists(), MY_BRANCH, day).map((s) => (s.src ? Object.assign({}, s.e, { volume: typeof s.e.volume === 'number' ? s.e.volume : branchVolume(s.src) }) : s.e));
+        return storeAudioPlanOn_(promoLists(), MY_BRANCH, day).map((s) => (s.src ? Object.assign({}, s.e, { borrowGain: STORE_AUDIO_LEVEL_GAIN_[borrowLevel(s.e.url)] }) : s.e));
       }
       const general = [];
       const mine = [];
@@ -580,19 +607,12 @@
     }
     function promoActiveUrls() { return promoActiveEntries().map((e) => e.url); }
     function entryVolume(e) {
-      const v = e && e.volume;
-      return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : promoVolume();
+      if (e && typeof e.borrowGain === 'number') return e.borrowGain;
+      const lv = elementLevel(e);
+      return STORE_AUDIO_LEVEL_GAIN_[lv !== null ? lv : branchLevel(MY_BRANCH)];
     }
     function promoVolume() {
-      const sv = SHEET?.audio?.volume;
-      if (typeof sv === 'number' && Number.isFinite(sv) && sv >= 0) return sv;
-      const by = cfg.audio?.volumeByBranch;
-      if (MY_BRANCH && by && typeof by === 'object' && !Array.isArray(by)) {
-        const key = Object.keys(by).find((k) => String(k).trim().toUpperCase() === MY_BRANCH);
-        const v = key === undefined ? undefined : by[key];
-        if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
-      }
-      return cfg.audio?.volume;
+      return STORE_AUDIO_LEVEL_GAIN_[branchLevel(MY_BRANCH)];
     }
 
     async function playPromoUnit(n) {
