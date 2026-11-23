@@ -28,7 +28,9 @@
     "volume": 1,
     "tracks": [],
     "byBranch": {
-      "BLW": [],
+      "BLW": [
+        "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a"
+      ],
       "SCB": [
         {
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a",
