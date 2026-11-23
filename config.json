@@ -38,14 +38,7 @@
           "until": "2026-11-22"
         }
       ],
-      "SCB": [
-        {
-          "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/nov-1-22nd-clore-promo.m4a",
-          "level": 3,
-          "volume": 1,
-          "via": "BLW"
-        }
-      ]
+      "SCB": []
     }
   },
   "filler": {
