@@ -539,20 +539,51 @@
       }
       return promoEntries(by[key]);
     }
-    function storeAudioPlanOn_(lists, branch, day) {
+    function storeAudioGlobalView_(global, lists) {
       var DAY = /^\d{4}-\d{2}-\d{2}$/;
-      var live = function (e) { return (!e.from || (DAY.test(e.from) && day >= e.from)) && (!e.until || (DAY.test(e.until) && day <= e.until)); };
+      var out = {};
+      var pick = function (cur, v, max) { if (!v) return cur; if (!DAY.test(v) || !cur) return v; if (!DAY.test(cur)) return cur; return (max ? v > cur : v < cur) ? v : cur; };
+      if (global && typeof global === 'object' && !Array.isArray(global)) {
+        Object.keys(global).forEach(function (u) {
+          var g = global[u];
+          if (!g || typeof g !== 'object') return;
+          out[u] = { from: typeof g.from === 'string' ? g.from : '', until: typeof g.until === 'string' ? g.until : '' };
+          if (g.dormant === true) out[u].dormant = true;
+        });
+        return out;
+      }
+      Object.keys(lists || {}).sort().forEach(function (c) {
+        (lists[c] || []).forEach(function (e) {
+          if (!e || typeof e.url !== 'string' || !e.url) return;
+          var v = out[e.url] || (out[e.url] = { from: '', until: '' });
+          v.from = pick(v.from, e.from, true);
+          v.until = pick(v.until, e.until, false);
+        });
+      });
+      return out;
+    }
+    function storeAudioPlanOn_(lists, branch, day, global, off) {
+      var DAY = /^\d{4}-\d{2}-\d{2}$/;
+      var g = global && typeof global === 'object' ? global : {};
+      var offs = Array.isArray(off) ? off : [];
+      var isG = function (u) { return Object.prototype.hasOwnProperty.call(g, u) && !!g[u]; };
+      var live = function (e) { var d = isG(e.url) ? g[e.url] : e; return (!d.from || (DAY.test(d.from) && day >= d.from)) && (!d.until || (DAY.test(d.until) && day <= d.until)); };
       var slots = (lists[branch] || []).filter(live).slice(0, 2).map(function (e) { return { e: e, src: '' }; });
       if (slots.length >= 2) return slots;
+      var skip = function (u) { return !isG(u) || g[u].dormant === true || offs.indexOf(u) !== -1 || slots.some(function (s) { return s.e.url === u; }); };
       var count = {}, pool = [];
       Object.keys(lists).filter(function (c) { return c !== branch; }).sort().forEach(function (c) {
         (lists[c] || []).filter(live).slice(0, 2).forEach(function (e) {
-          if (slots.some(function (s) { return s.e.url === e.url; })) return;
+          if (skip(e.url)) return;
           if (!count[e.url]) { count[e.url] = 0; pool.push({ e: e, src: c, at: pool.length }); }
           count[e.url]++;
         });
       });
       pool.sort(function (a, b) { return (count[b.e.url] - count[a.e.url]) || (a.at - b.at); });
+      Object.keys(g).forEach(function (u) {
+        var e = { url: u, from: g[u].from || '', until: g[u].until || '' };
+        if (!count[u] && !skip(u) && live(e)) pool.push({ e: e, src: '*', at: pool.length });
+      });
       return slots.concat(pool.slice(0, 2 - slots.length).map(function (p) { return { e: p.e, src: p.src }; }));
     }
     function promoLists() {
@@ -584,6 +615,16 @@
       }
       return levelFromOldPromo(num(rawCfg.audio?.volume)) ?? STORE_AUDIO_LEVEL_DEFAULT_;
     }
+    function promoGlobal() {
+      const by = cfg.audio?.byBranch;
+      const all = {};
+      if (by && typeof by === 'object' && !Array.isArray(by)) Object.keys(by).forEach((k) => { if (Array.isArray(by[k])) all[String(k).trim().toUpperCase()] = promoEntries(by[k]); });
+      return storeAudioGlobalView_(rawCfg.audio?.global, all);
+    }
+    function promoOff() {
+      const po = SHEET?.audio?.promoOff;
+      return Array.isArray(po) ? po.filter((u) => typeof u === 'string') : [];
+    }
     function borrowLevel(url) {
       const bl = SHEET?.audio?.borrowLevels;
       return (bl && typeof bl === 'object' && !Array.isArray(bl) ? levelOk(bl[url]) : null) ?? STORE_AUDIO_LEVEL_DEFAULT_;
@@ -591,7 +632,7 @@
     function promoActiveEntries() {
       const day = promoDay();
       if (promoBranchList() !== null) {
-        return storeAudioPlanOn_(promoLists(), MY_BRANCH, day).map((s) => (s.src ? Object.assign({}, s.e, { borrowGain: STORE_AUDIO_LEVEL_GAIN_[borrowLevel(s.e.url)] }) : s.e));
+        return storeAudioPlanOn_(promoLists(), MY_BRANCH, day, promoGlobal(), promoOff()).map((s) => (s.src ? Object.assign({}, s.e, { borrowGain: STORE_AUDIO_LEVEL_GAIN_[borrowLevel(s.e.url)] }) : s.e));
       }
       const general = [];
       const mine = [];
