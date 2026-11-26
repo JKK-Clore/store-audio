@@ -145,7 +145,7 @@
     "SCB": {
       "audio": {
         "enabled": true,
-        "intervalMin": 5,
+        "intervalMin": 15,
         "volume": 1
       },
       "filler": {
