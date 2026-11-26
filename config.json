@@ -28,19 +28,10 @@
     "volume": 1,
     "tracks": [],
     "byBranch": {
-      "BLW": [
-        {
-          "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a",
-          "until": "2026-11-22"
-        }
-      ],
+      "BLW": [],
       "SCB": []
     },
-    "global": {
-      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a": {
-        "until": "2026-11-22"
-      }
-    }
+    "global": {}
   },
   "filler": {
     "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
@@ -51,9 +42,7 @@
         "enabled": true,
         "intervalMin": 15,
         "volume": 1,
-        "borrowLevels": {
-          "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/5085-sheppard-ave-e-6.m4a": 5
-        }
+        "borrowLevels": {}
       },
       "filler": {
         "tracks": [
