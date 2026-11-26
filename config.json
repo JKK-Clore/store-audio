@@ -28,10 +28,14 @@
     "volume": 1,
     "tracks": [],
     "byBranch": {
-      "BLW": [],
+      "BLW": [
+        "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/tanisha-1.m4a"
+      ],
       "SCB": []
     },
-    "global": {}
+    "global": {
+      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/tanisha-1.m4a": {}
+    }
   },
   "filler": {
     "track": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/filler/filler.m4a"
