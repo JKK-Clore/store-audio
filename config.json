@@ -48,7 +48,11 @@
           "level": 4,
           "volume": 1.6
         },
-        "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/radya-announcement-1-good.m4a"
+        {
+          "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/radya-announcement-1-good.m4a",
+          "level": 4,
+          "volume": 1.6
+        }
       ]
     },
     "global": {
