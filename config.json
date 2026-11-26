@@ -31,6 +31,7 @@
       "BLW": [
         {
           "url": "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/tanisha-1.m4a",
+          "until": "2026-11-29",
           "level": 5,
           "volume": 2.5
         },
@@ -43,7 +44,9 @@
       "SCB": []
     },
     "global": {
-      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/tanisha-1.m4a": {},
+      "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/tanisha-1.m4a": {
+        "until": "2026-11-29"
+      },
       "https://raw.githubusercontent.com/JKK-Clore/store-audio/main/audio/promo/tanisha-2.mp3": {}
     }
   },
