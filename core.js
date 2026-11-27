@@ -256,6 +256,14 @@
       const n = Number(v);
       return Number.isFinite(n) && n >= 0 ? n : 1;
     };
+    const STORE_AUDIO_TARGET_LUFS_ = -20;
+    const normGain = (url) => {
+      const m = cfg.audio && cfg.audio.loudness;
+      const v = m && typeof m === 'object' ? m[url] : undefined;
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < -70 || v > 0) return 1;
+      const db = Math.min(20, Math.max(-12, STORE_AUDIO_TARGET_LUFS_ - v));
+      return Math.pow(10, db / 20);
+    };
     const withTimeout = (p, ms, fallback) =>
       Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
 
@@ -406,11 +414,12 @@
         if (!blobCache[url]) void 0;
 
         let source, gain, limiter = null;
+        const effGain = (kind === 'promo' || kind === 'close') ? safeGain(volume) * normGain(url) : safeGain(volume);
         try {
           source = ctx.createMediaElementSource(a);
           gain   = ctx.createGain();
           source.connect(gain);
-          if (safeGain(volume) > 1) {
+          if (effGain > 1) {
             limiter = ctx.createDynamicsCompressor();
             limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20; limiter.attack.value = 0.003; limiter.release.value = 0.1;
             gain.connect(limiter);
@@ -418,7 +427,7 @@
           } else gain.connect(ctx.destination);
         } catch (e) { resolve(null); return; }
 
-        const targetGain = safeGain(volume);
+        const targetGain = effGain;
         gain.gain.value = fadeInMs > 0 ? 0.0001 : targetGain;
 
         let settled = false;
