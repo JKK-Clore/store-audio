@@ -147,6 +147,7 @@
 
       muteHold: false,
       prevVolume: 1,
+      handbackPending: false,
 
       promoActive: null,
       lastPromoType: 2,
@@ -167,7 +168,9 @@
       ? Number(cfg.closing.quietFromMin ?? cfg.closing.promoOffMin) : 40;
     const PAUSE_AT_MIN = Number.isFinite(Number(cfg.closing?.pauseAtMin))
       ? Number(cfg.closing.pauseAtMin) : 15;
-    const CROSS_MS = () => cfg.muteDuringAd?.crossfadeMs || 700;
+    const CROSS_MIN_MS = 1500;
+    const CROSS_MS = () => Math.min(5000, Math.max(CROSS_MIN_MS, Number(cfg.muteDuringAd?.crossfadeMs) || 0));
+    const HANDBACK_WAIT_MAX_MS = 3000;
 
     let sharedCtx = null;
     function getCtx() {
@@ -314,6 +317,7 @@
       });
     }
 
+    const FADE_AUDIO_STEP_SEC = 0.03;
     const fadeSteps = new Set();
     function stepFades() { [...fadeSteps].forEach((f) => f()); }
     function fadeTo(el, target, ms, onDone) {
@@ -327,7 +331,7 @@
         if (!fadeSteps.has(step)) return;
         if (el.__cloreFade !== token) { cancel(); return; }
         const p = Math.min((performance.now() - t0) / ms, 1);
-        const eased = 0.5 - 0.5 * Math.cos(p * Math.PI);
+        const eased = Math.sin(p * Math.PI / 2);
         el.volume = Math.min(1, Math.max(0, start + (target - start) * eased));
         if (p < 1) return;
         cancel();
@@ -339,8 +343,14 @@
         step();
         if (fadeSteps.has(step)) timer = setTimeout(loop, 25);
       };
+      const audioLoop = () => {
+        if (!fadeSteps.has(step)) return;
+        step();
+        if (fadeSteps.has(step)) silentSource(FADE_AUDIO_STEP_SEC, audioLoop);
+      };
       fadeSteps.add(step);
       loop();
+      if (fadeSteps.has(step)) silentSource(FADE_AUDIO_STEP_SEC, audioLoop);
     }
     function fadeGainTo(gainNode, target, ms, onDone) {
       if (!gainNode) { onDone?.(); return; }
@@ -352,6 +362,24 @@
         g.setValueAtTime(Math.max(g.value, 0.0001), t0);
         g.linearRampToValueAtTime(Math.max(target, 0.0001), t0 + ms / 1000);
       } catch (e) { g.value = target; }
+      if (onDone) setTimeout(onDone, ms + 60);
+    }
+    function fadeOutGain(gainNode, ms, onDone) {
+      if (!gainNode) { onDone?.(); return; }
+      const ctx = getCtx();
+      const g = gainNode.gain;
+      const t0 = ctx.currentTime;
+      try {
+        const from = Math.max(g.value, 0);
+        g.cancelScheduledValues(t0);
+        const n = 64;
+        const curve = new Float32Array(n);
+        for (let i = 0; i < n; i++) curve[i] = from * Math.cos((i / (n - 1)) * Math.PI / 2);
+        curve[n - 1] = 0;
+        g.setValueCurveAtTime(curve, t0, ms / 1000);
+      } catch (e) {
+        fadeGainTo(gainNode, 0, ms);
+      }
       if (onDone) setTimeout(onDone, ms + 60);
     }
 
@@ -366,14 +394,67 @@
       }
       video.muted = true;
     }
-    function restoreVideo(ms) {
+    function restoreVideo(ms, force) {
       if (!state.muteHold) return;
+      if (state.handbackPending && !force) return;
       state.muteHold = false;
       const video = document.querySelector('video');
       if (!video) return;
-      video.muted = false;
       video.volume = 0;
+      video.muted = false;
       fadeTo(video, state.prevVolume, ms || CROSS_MS());
+    }
+
+    function videoAudible(video, lastCt) {
+      return !!video && !video.paused && !video.ended && (video.readyState === undefined || video.readyState >= 3)
+        && typeof video.currentTime === 'number' && lastCt !== null && video.currentTime !== lastCt;
+    }
+    function waitVideoAudible(maxMs, abort) {
+      return new Promise((resolve) => {
+        const t0 = monoNow();
+        let lastCt = null;
+        let done = false;
+        const finish = (why) => { if (done) return; done = true; resolve(why); };
+        const poll = () => {
+          if (done) return;
+          if (abort()) { finish('abort'); return; }
+          const video = document.querySelector('video');
+          if (!video) { finish('no-video'); return; }
+          if (videoAudible(video, lastCt)) { finish('playing'); return; }
+          lastCt = typeof video.currentTime === 'number' ? video.currentTime : null;
+          if (monoNow() - t0 >= maxMs) { finish('timeout'); return; }
+          if (!silentSource(0.1, poll)) setTimeout(poll, 100);
+        };
+        poll();
+        setTimeout(() => { if (!done) finish(abort() ? 'abort' : 'timeout'); }, maxMs + 2500);
+      });
+    }
+    function handBackFromAd() {
+      const held = state.currentIsFiller && state.fillerAudio
+        ? { g: state.fillerGain, a: state.fillerAudio, s: state.fillerSource } : null;
+      const wake = state.fillerResolve;
+      if (wake) wake();
+      const fadeHeld = (ms) => {
+        if (!held) return;
+        fadeOutGain(held.g, ms, () => {
+          held.a.pause();
+          try { held.g.disconnect(); held.s.disconnect(); } catch (_) {}
+        });
+      };
+      if (state.closePlaying || state.unitPlaying) { fadeHeld(CROSS_MS()); return; }
+      const token = state.stopToken;
+      const aborted = () => state.adActive || token !== state.stopToken || state.closePlaying || state.unitPlaying;
+      state.handbackPending = true;
+      waitVideoAudible(HANDBACK_WAIT_MAX_MS, aborted).then((why) => {
+        state.handbackPending = false;
+        const ms = CROSS_MS();
+        if (aborted()) {
+          fadeHeld(ms);
+          return;
+        }
+        fadeHeld(ms);
+        restoreVideo(ms, true);
+      });
     }
 
     function playChime(volume) {
@@ -766,6 +847,7 @@
         if (state.nextFiller && !blobCache[state.nextFiller]) preload(state.nextFiller);
         const t = await createTrack(url, 1, cfg.muteDuringAd?.fadeMs || 300, 'filler');
         if (!t) { setTimeout(() => resolve(false), 3000); return; }
+        if (!state.adActive || state.quiet) { t.stop(); resolve(true); return; }
         state.currentIsFiller = true;
         state.fillerAudio = t.audio;
         state.fillerGain  = t.gain;
@@ -867,16 +949,7 @@
       } else if (!adShowing && state.adActive) {
         state.adActive = false;
         state.adManaged = false;
-        if (state.currentIsFiller && state.fillerAudio) {
-          const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
-          const wake = state.fillerResolve;
-          fadeGainTo(g, 0, CROSS_MS(), () => {
-            a.pause();
-            try { g.disconnect(); s.disconnect(); } catch (_) {}
-          });
-          if (wake) wake();
-        }
-        if (!state.closePlaying && !state.unitPlaying) restoreVideo(CROSS_MS());
+        handBackFromAd();
       }
     }
     const adObserver = new MutationObserver(syncAdState);
@@ -1244,13 +1317,7 @@
         if (!state.adActive) { return; }
         state.adActive = false;
         state.adManaged = false;
-        if (state.currentIsFiller && state.fillerAudio) {
-          const g = state.fillerGain, a = state.fillerAudio, s = state.fillerSource;
-          const wake = state.fillerResolve;
-          fadeGainTo(g, 0, CROSS_MS(), () => { a.pause(); try { g.disconnect(); s.disconnect(); } catch (_) {} });
-          if (wake) wake();
-        }
-        if (!state.closePlaying && !state.unitPlaying) restoreVideo(CROSS_MS());
+        handBackFromAd();
       }
     };
     globalTarget.syncClock = () => syncClock('manual').then(() => globalTarget.stateNow());

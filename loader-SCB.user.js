@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         [Clore] Store Audio Loader
 // @namespace    http://tampermonkey.net/clore
-// @version      3.2
-// @description  Loads the Clore store audio player (core.js and config.json). The same file for every store; a store's own file differs only in one baked store code.
+// @version      3.3
+// @description  Loads the Cloré store audio player (core.js and config.json). The same file for every store; a store's own file differs only in one baked store code.
 // @updateURL    https://raw.githubusercontent.com/JKK-Clore/store-audio/main/loader-SCB.user.js
 // @downloadURL  https://raw.githubusercontent.com/JKK-Clore/store-audio/main/loader-SCB.user.js
 // @match        https://www.youtube.com/*
+// @match        https://monumental-lolly-6fc2b3.netlify.app/modules/store_tools.html*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
@@ -14,6 +15,11 @@
 
 (function () {
   'use strict';
+
+  if (location.hostname !== 'www.youtube.com') {
+    document.documentElement.dataset.qcnAudioPlayer = '3.3';
+    return;
+  }
 
   const QCN_STORE_BRANCH = 'SCB';
 
